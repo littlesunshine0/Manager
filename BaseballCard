@@ -2525,7 +2525,7 @@ class AIAssistant: ObservableObject {
         let ungradedValuableCards = cards.filter {
             $0.gradeCompany == .raw &&
             ($0.estimatedValue ?? 0) > 100 &&
-            ($0.conditionEstimate == .mint || $0.conditionEstimate == .nearMint)
+            ($0.condition == .mint || $0.condition == .nearMint)
         }
         
         if !ungradedValuableCards.isEmpty {
@@ -3116,12 +3116,16 @@ struct SuggestionCard: View {
 
 // Comprehensive AI Assistant Interface
 struct AIAssistantInterface: View {
-    @Query private var cards: [BaseballCardModel]
+    @FetchRequest(sortDescriptors: []) private var cardEntities: FetchedResults<BaseballCard>
     @StateObject private var aiAssistant = EnhancedAIAssistant()
     @State private var queryText = ""
     @State private var selectedCapability: AICapabilityCategory = .core
     @State private var showVoiceInput = false
-    
+
+    private var cards: [BaseballCardModel] {
+        cardEntities.map { BaseballCardModel(from: $0) }
+    }
+
     var body: some View {
         NavigationSplitView {
             // Capability Categories Sidebar
@@ -3969,10 +3973,14 @@ struct ShowChecklist {
 }
 
 struct AnalyticsDashboard: View {
-    @Query private var cards: [BaseballCardModel]
+    @FetchRequest(sortDescriptors: []) private var cardEntities: FetchedResults<BaseballCard>
     @StateObject private var aiAssistant = AIAssistant()
     @State private var queryText = ""
-    
+
+    private var cards: [BaseballCardModel] {
+        cardEntities.map { BaseballCardModel(from: $0) }
+    }
+
     var body: some View {
         NavigationView {
             ScrollView {
@@ -4225,10 +4233,10 @@ struct AnalyticsDashboard: View {
                         await MainActor.run { queryText = "" }
                     }
                 }
-                .disabled(queryText.isEmpty || aiAssistant.isProcessing)
+                .disabled(queryText.isEmpty || aiAssistant.isTyping)
             }
-            
-            if aiAssistant.isProcessing {
+
+            if aiAssistant.isTyping {
                 HStack {
                     ProgressView()
                         .scaleEffect(0.8)
