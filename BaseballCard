@@ -1749,7 +1749,8 @@ extension BaseballCardModel {
         return company
     }
     
-    public var conditionEstimate: String { condition.description }
+    public var conditionEstimate: ConditionEstimate { condition.estimate }
+    public var conditionDescription: String { condition.description }
 }
 
 // Enhanced AI Assistant with 100 Capabilities
@@ -1801,7 +1802,7 @@ class EnhancedAIAssistant: ObservableObject {
         
         let description = """
         \(card.rookie ? "ROOKIE CARD! " : "")\(card.playerName) from the iconic \(card.cardYear) \(card.brand) set. 
-        \(card.gradeCompany != .raw ? "Professionally graded \(card.gradeDisplay)" : "Raw card in \(card.conditionEstimate) condition").
+        \(card.gradeCompany != .raw ? "Professionally graded \(card.gradeDisplay)" : "Raw card in \(card.conditionDescription) condition").
         \(card.serialNumber != nil ? "Serial numbered \(card.serialNumber!)." : "")
         Perfect for any \(card.team ?? "baseball") collection!
         """
@@ -3116,12 +3117,16 @@ struct SuggestionCard: View {
 
 // Comprehensive AI Assistant Interface
 struct AIAssistantInterface: View {
-    @Query private var cards: [BaseballCardModel]
+    let cards: [BaseballCardModel]
     @StateObject private var aiAssistant = EnhancedAIAssistant()
     @State private var queryText = ""
     @State private var selectedCapability: AICapabilityCategory = .core
     @State private var showVoiceInput = false
-    
+
+    init(cards: [BaseballCardModel] = []) {
+        self.cards = cards
+    }
+
     var body: some View {
         NavigationSplitView {
             // Capability Categories Sidebar
@@ -3969,10 +3974,14 @@ struct ShowChecklist {
 }
 
 struct AnalyticsDashboard: View {
-    @Query private var cards: [BaseballCardModel]
+    let cards: [BaseballCardModel]
     @StateObject private var aiAssistant = AIAssistant()
     @State private var queryText = ""
-    
+
+    init(cards: [BaseballCardModel] = []) {
+        self.cards = cards
+    }
+
     var body: some View {
         NavigationView {
             ScrollView {
@@ -4225,10 +4234,10 @@ struct AnalyticsDashboard: View {
                         await MainActor.run { queryText = "" }
                     }
                 }
-                .disabled(queryText.isEmpty || aiAssistant.isProcessing)
+                .disabled(queryText.isEmpty || aiAssistant.isTyping)
             }
-            
-            if aiAssistant.isProcessing {
+
+            if aiAssistant.isTyping {
                 HStack {
                     ProgressView()
                         .scaleEffect(0.8)
