@@ -1,0 +1,4380 @@
+//
+//  GradingCompany.swift
+//  AnalyticsDashboard
+//
+//  Created by garyrobertellis on 11/14/25.
+//
+import Foundation
+import CoreData
+import SwiftUI
+import Combine
+
+
+
+public struct BaseballCardModel: Identifiable, Equatable, Codable {
+    public var id: UUID = UUID()
+    public var playerName: String
+    public var cardYear: Int
+    public var brand: String
+    public var setName: String
+    public var cardNumber: String
+    public var team: String?
+
+    public var rookie: Bool = false
+    public var autograph: Bool = false
+    public var memorabilia: Bool = false
+    public var serialNumber: String? = nil
+    public var parallel: String? = nil
+
+    public var condition: CardCondition = .nearMint
+    public var gradeCompany: GradingCompany = .raw
+    public var gradeLabel: String? = nil
+    public var gradeCertNumber: String? = nil
+
+    public var estimatedValue: Decimal? = nil
+    public var purchasePrice: Decimal? = nil
+    public var purchaseDate: Date? = nil
+    public var purchaseSource: String? = nil
+
+    public var notes: String? = nil
+
+    // Display helpers
+    public var headline: String { "\(playerName) — \(cardYear) \(brand) \(setName) #\(cardNumber)" }
+    public var valueDisplay: String {
+        guard let v = estimatedValue else { return "—" }
+        return NumberFormatter.currencyUS.string(from: NSDecimalNumber(decimal: v)) ?? "—"
+    }
+}
+
+private extension NumberFormatter {
+    static let currencyUS: NumberFormatter = {
+        let nf = NumberFormatter()
+        nf.numberStyle = .currency
+        nf.currencyCode = "USD"
+        return nf
+    }()
+}
+
+public extension BaseballCardModel {
+    init(from obj: BaseballCard) {
+        self.id = obj.id
+        self.playerName = obj.playerName
+        self.cardYear = Int(obj.cardYear)
+        self.brand = obj.brand
+        self.setName = obj.setName
+        self.cardNumber = obj.cardNumber
+        self.team = obj.team
+        self.rookie = obj.rookie
+        self.autograph = obj.autograph
+        self.memorabilia = obj.memorabilia
+        self.serialNumber = obj.serialNumber
+        self.parallel = obj.parallel
+        self.condition = CardCondition(from: obj.conditionEstimate)
+        self.gradeCompany = obj.gradeCompany
+        self.gradeLabel = obj.gradeLabel
+        self.gradeCertNumber = obj.gradeCertNumber
+        self.estimatedValue = obj.estimatedValueDecimal
+        self.purchasePrice = obj.purchasePriceDecimal
+        self.purchaseDate = obj.purchaseDate
+        self.purchaseSource = obj.purchaseSource
+        self.notes = obj.notes
+    }
+
+    func apply(to obj: BaseballCard) {
+        obj.id = id
+        obj.playerName = playerName
+        obj.cardYear = Int16(cardYear)
+        obj.brand = brand
+        obj.setName = setName
+        obj.cardNumber = cardNumber
+        obj.team = team
+        obj.rookie = rookie
+        obj.autograph = autograph
+        obj.memorabilia = memorabilia
+        obj.serialNumber = serialNumber
+        obj.parallel = parallel
+        obj.conditionEstimate = condition.estimate
+        obj.gradeCompany = gradeCompany
+        obj.gradeLabel = gradeLabel
+        obj.gradeCertNumber = gradeCertNumber
+        obj.estimatedValueDecimal = estimatedValue
+        obj.purchasePriceDecimal = purchasePrice
+        obj.purchaseDate = purchaseDate
+        obj.purchaseSource = purchaseSource
+        obj.notes = notes
+    }
+}
+
+
+// Helpers to safely access values that may not exist on BaseballCardModel
+private extension BaseballCardModel {
+    var marketValueDecimal: Decimal { (self.estimatedValue as? Decimal) ?? 0 }
+    var marketValueDouble: Double { NSDecimalNumber(decimal: marketValueDecimal).doubleValue }
+    var playerNameSafe: String { self.playerName }
+    var isRookieSafe: Bool { self.rookie }
+    var cardYearSafe: Int { self.cardYear }
+    var isRawGrade: Bool { self.gradeCompany == .raw }
+    var marketTrendString: String {
+        // Try common property names without creating compile-time dependency
+        if let mirrorTrend = Mirror(reflecting: self).children.first(where: { $0.label == "trend" })?.value as? String {
+            return mirrorTrend
+        }
+        if let mirrorMarketTrend = Mirror(reflecting: self).children.first(where: { $0.label == "marketTrend" })?.value as? String {
+            return mirrorMarketTrend
+        }
+        return ""
+    }
+}
+
+// Local risk level for analytics
+enum RiskLevel {
+    case low, medium, high
+}
+
+// Advanced Portfolio Analytics (Market Movers/Alt style)
+struct AdvancedAnalytics {
+    
+    // 1. High Concentration Risk Analysis
+    static func analyzeConcentrationRisk(cards: [BaseballCardModel]) -> ConcentrationRisk {
+        let totalValue: Decimal = cards.map { $0.marketValueDecimal }.reduce(0, +)
+        
+        // Group by player
+        let playerValues = Dictionary(grouping: cards) { $0.playerNameSafe }
+            .mapValues { playerCards in
+                playerCards.map { $0.marketValueDecimal }.reduce(0, +)
+            }
+        
+        // Find highest concentration
+        let topPlayer = playerValues.max { $0.value < $1.value }
+        let topPlayerValue = topPlayer?.value ?? 0
+        let concentrationPercent = (NSDecimalNumber(decimal: totalValue).doubleValue > 0) ? (NSDecimalNumber(decimal: topPlayerValue).doubleValue / NSDecimalNumber(decimal: totalValue).doubleValue * 100.0) : 0
+        
+        let riskLevel: RiskLevel
+        if concentrationPercent > 50 { riskLevel = .high }
+        else if concentrationPercent > 30 { riskLevel = .medium }
+        else { riskLevel = .low }
+        
+        return ConcentrationRisk(
+            topPlayer: topPlayer?.key ?? "Unknown",
+            concentrationPercent: concentrationPercent,
+            riskLevel: riskLevel,
+            recommendation: getRiskRecommendation(riskLevel, concentrationPercent)
+        )
+    }
+    
+    // 2. Vintage Premium Potential Analysis
+    static func analyzeVintagePremium(cards: [BaseballCardModel]) -> [VintagePremium] {
+        let vintageEras = [
+            (1980...1985, "Early 80s Legends"),
+            (1986...1994, "Junk Wax Era"),
+            (1995...2005, "Modern Era"),
+            (2006...2015, "Digital Era"),
+            (2016...2024, "Current Era")
+        ]
+        
+        return vintageEras.compactMap { (range, eraName) in
+            let eraCards = cards.filter { range.contains($0.cardYearSafe) }
+            guard !eraCards.isEmpty else { return nil }
+            
+            let avgValue: Decimal = eraCards.map { $0.marketValueDecimal }.reduce(0, +) / Decimal(eraCards.count)
+            let premiumCards = eraCards.filter { $0.marketValueDecimal > (avgValue * 1.5) }
+            
+            let premiumPercent = Double(premiumCards.count) / Double(eraCards.count) * 100
+            
+            return VintagePremium(
+                era: eraName,
+                yearRange: "\(range.lowerBound)-\(range.upperBound)",
+                totalCards: eraCards.count,
+                premiumCards: premiumCards.count,
+                premiumPercent: premiumPercent,
+                avgValue: avgValue,
+                opportunity: getVintageOpportunity(eraName, premiumPercent)
+            )
+        }
+    }
+    
+    // 3. Rookie Card Focus Analysis
+    static func analyzeRookieFocus(cards: [BaseballCardModel]) -> RookieFocus {
+        let rookieCards = cards.filter { $0.isRookieSafe }
+        let totalValue: Decimal = cards.map { $0.marketValueDecimal }.reduce(0, +)
+        let rookieValue: Decimal = rookieCards.map { $0.marketValueDecimal }.reduce(0, +)
+        
+        let rookiePercent = (NSDecimalNumber(decimal: totalValue).doubleValue > 0) ? (NSDecimalNumber(decimal: rookieValue).doubleValue / NSDecimalNumber(decimal: totalValue).doubleValue * 100.0) : 0
+        
+        let topRookies = rookieCards.sorted { $0.marketValueDecimal > $1.marketValueDecimal }.prefix(5)
+        
+        return RookieFocus(
+            totalRookies: rookieCards.count,
+            rookieValuePercent: rookiePercent,
+            rookieValue: rookieValue,
+            topRookies: Array(topRookies),
+            strategy: getRookieStrategy(rookiePercent)
+        )
+    }
+    
+    // 4. Portfolio Optimizer Suggestions
+    static func generateOptimizationSuggestions(cards: [BaseballCardModel]) -> [OptimizationSuggestion] {
+        var suggestions: [OptimizationSuggestion] = []
+        
+        // Concentration risk suggestion
+        let concentration = analyzeConcentrationRisk(cards: cards)
+        if concentration.riskLevel == .high {
+            suggestions.append(OptimizationSuggestion(
+                type: .diversification,
+                priority: .high,
+                title: "Reduce Concentration Risk",
+                description: "Consider selling 25-30% of your \(concentration.topPlayer) holdings to diversify into other players or eras.",
+                impact: "Reduce portfolio volatility by 15-20%"
+            ))
+        }
+        
+        // Grading opportunity
+        let ungradedHighValue = cards.filter {
+            $0.isRawGrade && $0.marketValueDecimal > 50
+        }
+        if ungradedHighValue.count > 0 {
+            suggestions.append(OptimizationSuggestion(
+                type: .grading,
+                priority: .medium,
+                title: "Grading Opportunity",
+                description: "\(ungradedHighValue.count) high-value cards could benefit from professional grading.",
+                impact: "Potential 20-40% value increase for PSA 9+ grades"
+            ))
+        }
+        
+        // Market timing
+        let risingCards = cards.filter { $0.marketTrendString == "Rising" }
+        if risingCards.count > 3 {
+            suggestions.append(OptimizationSuggestion(
+                type: .timing,
+                priority: .low,
+                title: "Market Timing Opportunity",
+                description: "\(risingCards.count) cards showing upward trends - consider taking profits.",
+                impact: "Lock in gains before potential market correction"
+            ))
+        }
+        
+        return suggestions
+    }
+    
+    // Supporting functions
+    private static func getRiskRecommendation(_ level: RiskLevel, _ percent: Double) -> String {
+        switch level {
+        case .high: return "Sell 25-30% of top holding to reduce risk"
+        case .medium: return "Monitor closely, consider partial diversification"
+        case .low: return "Well diversified portfolio"
+        }
+    }
+    
+    private static func getVintageOpportunity(_ era: String, _ premium: Double) -> String {
+        if era.contains("Junk Wax") && premium > 15 {
+            return "Strong premium cards in typically low-value era"
+        } else if era.contains("Early 80s") && premium > 25 {
+            return "Excellent vintage holdings with growth potential"
+        } else {
+            return "Standard distribution for era"
+        }
+    }
+    
+    private static func getRookieStrategy(_ percent: Double) -> String {
+        if percent > 70 { return "High rookie focus - consider veteran balance" }
+        else if percent > 40 { return "Strong rookie foundation" }
+        else { return "Consider increasing rookie card allocation" }
+    }
+}
+
+// Data structures
+struct ConcentrationRisk {
+    let topPlayer: String
+    let concentrationPercent: Double
+    let riskLevel: RiskLevel
+    let recommendation: String
+}
+
+struct VintagePremium {
+    let era: String
+    let yearRange: String
+    let totalCards: Int
+    let premiumCards: Int
+    let premiumPercent: Double
+    let avgValue: Decimal
+    let opportunity: String
+}
+
+struct RookieFocus {
+    let totalRookies: Int
+    let rookieValuePercent: Double
+    let rookieValue: Decimal
+    let topRookies: [BaseballCardModel]
+    let strategy: String
+}
+
+struct OptimizationSuggestion {
+    let type: SuggestionType
+    let priority: Priority
+    let title: String
+    let description: String
+    let impact: String
+}
+
+
+enum SuggestionType {
+    case diversification, grading, timing, acquisition
+}
+
+enum Priority {
+    case low, medium, high
+    
+    var color: Color {
+        switch self {
+        case .low: return .blue
+        case .medium: return .orange
+        case .high: return .red
+        }
+    }
+}
+
+// AI Assistant for conversational queries
+@MainActor
+
+struct AssistantResponse {
+    let query: String
+    let response: String
+    let timestamp: Date
+}
+
+
+// MARK: - Enumerations backed by Core Data primitive types
+
+@objc public enum GradingCompany: Int16, Codable, CustomStringConvertible {
+    case raw = 0
+    case psa = 1
+    case bgs = 2   // Beckett
+    case sgc = 3
+    case csg = 4
+    case hga = 5
+    case other = 99
+
+    public var description: String {
+        switch self {
+        case .raw: return "RAW"
+        case .psa: return "PSA"
+        case .bgs: return "BGS"
+        case .sgc: return "SGC"
+        case .csg: return "CSG"
+        case .hga: return "HGA"
+        case .other: return "OTHER"
+        }
+    }
+
+}
+
+// MARK: - UI Stubs (compile-safe minimal views)
+
+private struct CardRow: View {
+    let card: BaseballCard
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(card.playerName)
+                    .font(.headline)
+                Text("\(card.cardYear) \(card.brand) \(card.setName) #\(card.cardNumber)")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Text(card.gradeDisplay)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let v = card.estimatedValue?.stringValue, !v.isEmpty {
+                    Text("Est. $\(v)")
+                        .font(.caption2)
+                }
+            }
+            Spacer()
+        }
+        .padding(.vertical, 6)
+    }
+}
+
+private struct FilterChipsView: View {
+    @Binding var filter: CardFilter
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                Chip(label: "Rookie", active: filter.rookie == true) {
+                    filter.rookie = (filter.rookie == true) ? nil : true
+                }
+                Chip(label: "Auto", active: filter.autograph == true) {
+                    filter.autograph = (filter.autograph == true) ? nil : true
+                }
+                // Grade company quick chips
+                ForEach([GradingCompany.psa, .sgc, .bgs], id: \.self) { company in
+                    Chip(label: company.description, active: filter.gradeCompanies.contains(company)) {
+                        if filter.gradeCompanies.contains(company) {
+                            filter.gradeCompanies.remove(company)
+                        } else {
+                            filter.gradeCompanies.insert(company)
+                        }
+                    }
+                }
+            }
+            .padding(.vertical, 6)
+        }
+    }
+}
+
+private struct Chip: View {
+    let label: String
+    let active: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(label)
+                .font(.caption)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(active ? Color.accentColor.opacity(0.2) : Color.secondary.opacity(0.15))
+                .overlay(
+                    Capsule()
+                        .stroke(active ? Color.accentColor : Color.secondary.opacity(0.5), lineWidth: 1)
+                )
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct AdvancedFiltersView: View {
+    @Binding var filter: CardFilter
+    @Environment(\.dismiss) private var dismiss
+    @State private var brandInput: String = ""
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section(header: Text("Quick Toggles")) {
+                    Toggle(isOn: Binding(
+                        get: { filter.rookie == true },
+                        set: { filter.rookie = $0 ? true : nil }
+                    )) { Text("Rookie only") }
+
+                    Toggle(isOn: Binding(
+                        get: { filter.autograph == true },
+                        set: { filter.autograph = $0 ? true : nil }
+                    )) { Text("Autograph only") }
+                }
+
+                Section(header: Text("Grading Companies")) {
+                    HStack(spacing: 8) {
+                        ForEach([GradingCompany.psa, .sgc, .bgs, .csg, .hga], id: \.self) { c in
+                            Chip(label: c.description, active: filter.gradeCompanies.contains(c)) {
+                                if filter.gradeCompanies.contains(c) {
+                                    filter.gradeCompanies.remove(c)
+                                } else {
+                                    filter.gradeCompanies.insert(c)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Section(header: Text("Brand")) {
+                    HStack {
+                        TextField("Add brand…", text: $brandInput)
+                        Button("Add") {
+                            let trimmed = brandInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard !trimmed.isEmpty else { return }
+                            filter.brands.insert(trimmed)
+                            brandInput = ""
+                        }
+                    }
+                    if !filter.brands.isEmpty {
+                        Wrap(tags: Array(filter.brands)) { tag in
+                            Chip(label: tag, active: true) {
+                                filter.brands.remove(tag)
+                            }
+                        }
+                    }
+                }
+
+                Section(header: Text("Year Range")) {
+                    Stepper("Min: \(filter.minYear ?? 0)", value: Binding(get: { Int(filter.minYear ?? 0) }, set: { filter.minYear = Int16($0) }), in: 0...3000)
+                    Stepper("Max: \(filter.maxYear ?? 0)", value: Binding(get: { Int(filter.maxYear ?? 0) }, set: { filter.maxYear = Int16($0) }), in: 0...3000)
+                }
+
+                Section(header: Text("Estimated Value")) {
+                    // Minimal numeric fields to avoid custom formatters
+                    TextField("Min $", text: Binding(
+                        get: { filter.minValue.map { "\($0)" } ?? "" },
+                        set: { filter.minValue = Decimal(string: $0) }
+                    ))
+#if os(iOS)
+                    .keyboardType(.decimalPad)
+#endif
+                    TextField("Max $", text: Binding(
+                        get: { filter.maxValue.map { "\($0)" } ?? "" },
+                        set: { filter.maxValue = Decimal(string: $0) }
+                    ))
+#if os(iOS)
+                    .keyboardType(.decimalPad)
+#endif
+                }
+
+                Section {
+                    Button("Clear All") { filter = CardFilter() }
+                }
+            }
+            .navigationTitle("Filters")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+// Simple wrapping layout for tags in the form
+private struct Wrap<TagView: View>: View {
+    let tags: [String]
+    let makeTag: (String) -> TagView
+
+    var body: some View {
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+        return GeometryReader { geo in
+            ZStack(alignment: .topLeading) {
+                ForEach(tags, id: \.self) { tag in
+                    makeTag(tag)
+                        .alignmentGuide(.leading, computeValue: { d in
+                            if (abs(width - d.width) > geo.size.width) {
+                                width = 0
+                                height -= d.height
+                            }
+                            let result = width
+                            if tag == tags.last { width = 0 } else { width -= d.width }
+                            return result
+                        })
+                        .alignmentGuide(.top, computeValue: { _ in
+                            let result = height
+                            if tag == tags.last { height = 0 }
+                            return result
+                        })
+                }
+            }
+        }
+        .frame(minHeight: 24)
+    }
+}
+
+@objc public enum ConditionEstimate: Int16, CustomStringConvertible {
+    case unknown = 0
+    case poor = 1
+    case fair = 2
+    case good = 3
+    case veryGood = 4
+    case excellent = 5
+    case exMt = 6
+    case nearMint = 7
+    case nmMt = 8
+    case mint = 9
+    case gemMint = 10
+
+    public var description: String {
+        switch self {
+        case .unknown: return "Unknown"
+        case .poor: return "Poor"
+        case .fair: return "Fair"
+        case .good: return "Good"
+        case .veryGood: return "VG"
+        case .excellent: return "EX"
+        case .exMt: return "EX-MT"
+        case .nearMint: return "NM"
+        case .nmMt: return "NM-MT"
+        case .mint: return "MINT"
+        case .gemMint: return "GEM MINT"
+        }
+    }
+}
+
+// MARK: - Core Data entity
+
+@objc(BaseballCard)
+public final class BaseballCard: NSManagedObject {
+    @nonobjc
+    public class func fetchRequest() -> NSFetchRequest<BaseballCard> {
+        NSFetchRequest<BaseballCard>(entityName: "BaseballCard")
+    }
+
+    // Convenience fetch by identity tuple
+    @nonobjc
+    public class func fetchRequest(
+        player: String,
+        year: Int16,
+        brand: String,
+        setName: String,
+        cardNumber: String
+    ) -> NSFetchRequest<BaseballCard> {
+        let req = fetchRequest()
+        req.fetchLimit = 1
+        req.predicate = NSPredicate(
+            format: "playerName ==[c] %@ AND cardYear == %d AND brand ==[c] %@ AND setName ==[c] %@ AND cardNumber ==[c] %@",
+            player, year, brand, setName, cardNumber
+        )
+        return req
+    }
+}
+
+// MARK: - Attributes
+
+public extension BaseballCard {
+    // Identity & timestamps
+    @NSManaged var id: UUID
+    @NSManaged var createdAt: Date
+    @NSManaged var updatedAt: Date
+
+    // Canonical identity tuple
+    @NSManaged var playerName: String
+    @NSManaged var team: String?
+    @NSManaged var cardYear: Int16 // matches .xcdatamodeld Int16
+    @NSManaged var brand: String   // e.g., Topps, Fleer, Donruss
+    @NSManaged var setName: String // e.g., Base, Update, Traded
+    @NSManaged var subsetName: String?
+    @NSManaged var cardNumber: String // keep as String to preserve things like "U-1"
+
+    // Flags / variants
+    @NSManaged var rookie: Bool
+    @NSManaged var parallel: String?       // e.g., Refractor, Gold, Sapphire
+    @NSManaged var serialNumber: String?   // e.g., "12/99" (store verbatim)
+    @NSManaged var autograph: Bool
+    @NSManaged var memorabilia: Bool
+
+    // Condition (self-assessed for raw)
+    @NSManaged var conditionEstimateRaw: Int16 // maps to ConditionEstimate
+    @NSManaged var surfaceSub: Int16   // 0-10, 0 unknown
+    @NSManaged var edgesSub: Int16
+    @NSManaged var cornersSub: Int16
+    @NSManaged var centeringSub: Int16
+
+    // Imaging (store file paths or URLs as String; keeps Core Data simple)
+    @NSManaged var frontImagePath: String?
+    @NSManaged var backImagePath: String?
+
+    // Purchase info
+    @NSManaged var purchasePrice: NSDecimalNumber? // design.md preferred Decimal; NSDecimalNumber bridges best in Core Data
+    @NSManaged var purchaseDate: Date?
+    @NSManaged var purchaseSource: String?   // show, ebay, friend, etc.
+
+    // Pricing
+    @NSManaged var estimatedValue: NSDecimalNumber? // Decimal in design; bridge via NSDecimalNumber
+
+    // Grading
+    @NSManaged var gradeCompanyRaw: Int16 // maps to GradingCompany
+    @NSManaged var gradeLabel: String?    // e.g., "9", "9.5", "AUTH"
+    @NSManaged var gradeCertNumber: String?
+
+    // Misc
+    @NSManaged var notes: String?
+}
+
+// MARK: - Computed wrappers
+
+public extension BaseballCard {
+    var gradeCompany: GradingCompany {
+        get { GradingCompany(rawValue: gradeCompanyRaw) ?? .raw }
+        set { gradeCompanyRaw = newValue.rawValue }
+    }
+
+    var conditionEstimate: ConditionEstimate {
+        get { ConditionEstimate(rawValue: conditionEstimateRaw) ?? .unknown }
+        set { conditionEstimateRaw = newValue.rawValue }
+    }
+
+    var purchasePriceDecimal: Decimal? {
+        get { purchasePrice?.decimalValue }
+        set { purchasePrice = newValue.map { NSDecimalNumber(decimal: $0) } }
+    }
+
+    var estimatedValueDecimal: Decimal? {
+        get { estimatedValue?.decimalValue }
+        set { estimatedValue = newValue.map { NSDecimalNumber(decimal: $0) } }
+    }
+
+    var identityKey: String {
+        "\(cardYear)-\(brand)-\(setName)-#\(cardNumber)-\(playerName)".lowercased()
+    }
+
+    var isNumbered: Bool { serialNumber?.isEmpty == false }
+
+    var gradeDisplay: String {
+        let company = gradeCompany == .raw ? "RAW" : gradeCompany.description
+        if let g = gradeLabel, !g.isEmpty { return "\(company) \(g)" }
+        return company
+    }
+}
+
+// MARK: - Lifecycle hooks
+
+public extension BaseballCard {
+}
+
+// MARK: - Convenience constructor
+
+public extension BaseballCard {
+    static func insert(
+        in context: NSManagedObjectContext,
+        playerName: String,
+        year: Int16,
+        brand: String,
+        setName: String,
+        cardNumber: String,
+        team: String? = nil,
+        rookie: Bool = false
+    ) -> BaseballCard {
+        let obj = BaseballCard(context: context)
+        obj.id = UUID()
+        let now = Date()
+        obj.createdAt = now
+        obj.updatedAt = now
+        obj.playerName = playerName
+        obj.cardYear = year
+        obj.brand = brand
+        obj.setName = setName
+        obj.cardNumber = cardNumber
+        obj.team = team
+        obj.rookie = rookie
+        return obj
+    }
+}
+
+// MARK: - Common fetch helpers
+
+public extension BaseballCard {
+    static func fetchAllSortedRequest() -> NSFetchRequest<BaseballCard> {
+        let req = fetchRequest()
+        req.sortDescriptors = [
+            NSSortDescriptor(key: #keyPath(BaseballCard.cardYear), ascending: false),
+            NSSortDescriptor(key: #keyPath(BaseballCard.playerName), ascending: true),
+            NSSortDescriptor(key: #keyPath(BaseballCard.brand), ascending: true),
+            NSSortDescriptor(key: #keyPath(BaseballCard.setName), ascending: true),
+            NSSortDescriptor(key: #keyPath(BaseballCard.cardNumber), ascending: true)
+        ]
+        return req
+    }
+
+    static func fetchByPlayer(_ name: String) -> NSFetchRequest<BaseballCard> {
+        let req = fetchRequest()
+        req.predicate = NSPredicate(format: "playerName CONTAINS[cd] %@", name)
+        req.sortDescriptors = [
+            NSSortDescriptor(key: #keyPath(BaseballCard.cardYear), ascending: false),
+            NSSortDescriptor(key: #keyPath(BaseballCard.playerName), ascending: true)
+        ]
+        return req
+    }
+
+    static func fetchValuable(minEstimated: Decimal) -> NSFetchRequest<BaseballCard> {
+        let req = fetchRequest()
+        let min = NSDecimalNumber(decimal: minEstimated)
+        req.predicate = NSPredicate(format: "estimatedValue >= %@", min)
+        req.sortDescriptors = [
+            NSSortDescriptor(key: #keyPath(BaseballCard.estimatedValue), ascending: false)
+        ]
+        return req
+    }
+}
+
+public struct CardFilter: Equatable {
+    public var text: String = ""
+    public var rookie: Bool? = nil         // nil:any, true:only rookies, false:non-rookies
+    public var autograph: Bool? = nil
+    public var gradeCompanies: Set<GradingCompany> = []
+    public var brands: Set<String> = []
+    public var minYear: Int16? = nil
+    public var maxYear: Int16? = nil
+    public var minValue: Decimal? = nil
+    public var maxValue: Decimal? = nil
+}
+
+public enum CardSort: CaseIterable {
+    case yearDesc, valueDesc, playerAZ, brandAZ, createdDesc
+
+    var descriptors: [NSSortDescriptor] {
+        switch self {
+        case .yearDesc:   return [NSSortDescriptor(key: #keyPath(BaseballCard.cardYear), ascending: false),
+                                  NSSortDescriptor(key: #keyPath(BaseballCard.playerName), ascending: true)]
+        case .valueDesc:  return [NSSortDescriptor(key: #keyPath(BaseballCard.estimatedValue), ascending: false)]
+        case .playerAZ:   return [NSSortDescriptor(key: #keyPath(BaseballCard.playerName), ascending: true)]
+        case .brandAZ:    return [NSSortDescriptor(key: #keyPath(BaseballCard.brand), ascending: true),
+                                  NSSortDescriptor(key: #keyPath(BaseballCard.setName), ascending: true)]
+        case .createdDesc:return [NSSortDescriptor(key: #keyPath(BaseballCard.createdAt), ascending: false)]
+        }
+    }
+}
+
+public extension CardFilter {
+    func predicate() -> NSPredicate? {
+        var subs: [NSPredicate] = []
+
+        if !text.isEmpty {
+            let t = text as NSString
+            subs += [NSPredicate(format: "playerName CONTAINS[cd] %@ OR brand CONTAINS[cd] %@ OR setName CONTAINS[cd] %@ OR cardNumber CONTAINS[cd] %@", t, t, t, t)]
+        }
+        if let r = rookie { subs.append(NSPredicate(format: "rookie == %@", NSNumber(value: r))) }
+        if let a = autograph { subs.append(NSPredicate(format: "autograph == %@", NSNumber(value: a))) }
+        if !gradeCompanies.isEmpty {
+            let raw = gradeCompanies.map { NSNumber(value: $0.rawValue) }
+            subs.append(NSPredicate(format: "gradeCompanyRaw IN %@", raw))
+        }
+        if !brands.isEmpty {
+            subs.append(NSPredicate(format: "brand IN %@", brands.map{$0}))
+        }
+        if let lo = minYear { subs.append(NSPredicate(format: "cardYear >= %d", lo)) }
+        if let hi = maxYear { subs.append(NSPredicate(format: "cardYear <= %d", hi)) }
+        if let lo = minValue { subs.append(NSPredicate(format: "estimatedValue >= %@", NSDecimalNumber(decimal: lo))) }
+        if let hi = maxValue { subs.append(NSPredicate(format: "estimatedValue <= %@", NSDecimalNumber(decimal: hi))) }
+
+        return subs.isEmpty ? nil : NSCompoundPredicate(andPredicateWithSubpredicates: subs)
+    }
+}
+
+@MainActor
+final class CardsQuery: NSObject, ObservableObject {
+    @Published var items: [BaseballCard] = []
+    private let context: NSManagedObjectContext
+    private var frc: NSFetchedResultsController<BaseballCard>!
+
+    init(context: NSManagedObjectContext) {
+        self.context = context
+        super.init()
+    }
+
+    func apply(filter: CardFilter, sort: CardSort) throws {
+        let req: NSFetchRequest<BaseballCard> = BaseballCard.fetchRequest()
+        req.predicate = filter.predicate()
+        req.sortDescriptors = sort.descriptors
+        req.fetchBatchSize = 50
+
+        frc = NSFetchedResultsController(fetchRequest: req,
+                                         managedObjectContext: context,
+                                         sectionNameKeyPath: nil,
+                                         cacheName: nil)
+        frc.delegate = self
+        try frc.performFetch()
+        items = frc.fetchedObjects ?? []
+    }
+}
+
+// Isolate the delegate conformance to the main actor
+@MainActor
+extension CardsQuery: @MainActor NSFetchedResultsControllerDelegate {
+    func controllerDidChangeContent(_ controller: NSFetchedResultsController<NSFetchRequestResult>) {
+        items = (controller.fetchedObjects as? [BaseballCard]) ?? []
+    }
+}
+
+
+struct CardListView: View {
+    @StateObject private var query: CardsQuery
+    @State private var filter = CardFilter()
+    @State private var sort: CardSort = .yearDesc
+    @State private var showFilters = false
+    @State private var search = ""
+    @State private var showAdd = false
+
+    init(context: NSManagedObjectContext) {
+        _query = StateObject(wrappedValue: CardsQuery(context: context))
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack {
+                // Inline quick chips
+                FilterChipsView(filter: $filter)
+                    .padding(.horizontal)
+
+                List {
+                    ForEach(query.items, id: \.objectID) { card in
+                        NavigationLink {
+                            CardDetailView(card: card)
+                        } label: {
+                            CardRow(card: card)
+                        }
+                    }
+                }
+                #if os(iOS)
+                .searchable(text: $search, placement: .navigationBarDrawer(displayMode: .always))
+                #else
+                .searchable(text: $search)
+                #endif
+                .onChange(of: search) { filter.text = search }
+                .toolbar {
+                    ToolbarItemGroup(placement: .primaryAction) {
+                        Button {
+                            showAdd = true
+                        } label: { Label("Add", systemImage: "plus") }
+
+                        Menu("Sort") {
+                            Picker("Sort", selection: $sort) {
+                                Text("Year ↓").tag(CardSort.yearDesc)
+                                Text("Value ↓").tag(CardSort.valueDesc)
+                                Text("Player A–Z").tag(CardSort.playerAZ)
+                                Text("Brand A–Z").tag(CardSort.brandAZ)
+                                Text("Newest").tag(CardSort.createdDesc)
+                            }
+                        }
+                        Button {
+                            showFilters = true
+                        } label: { Label("Filters", systemImage: "line.3.horizontal.decrease.circle") }
+                    }
+                }
+                .sheet(isPresented: $showFilters) {
+                    AdvancedFiltersView(filter: $filter)
+                }
+                .sheet(isPresented: $showAdd) {
+                    AddCardView()
+                }
+                .task { try? query.apply(filter: filter, sort: sort) }
+                .onChange(of: filter) { _ in try? query.apply(filter: filter, sort: sort) }
+                .onChange(of: sort) { _ in try? query.apply(filter: filter, sort: sort) }
+            }
+            .navigationTitle("Cards")
+        }
+    }
+}
+
+struct CollectionStats {
+    // Hero
+    var totalCards: Int = 0
+    var portfolioValue: Decimal = 0
+    var costBasis: Decimal = 0
+    var unrealizedPL: Decimal { portfolioValue - costBasis }
+    var roiPercent: Double {
+        guard costBasis > 0 else { return 0 }
+        return (NSDecimalNumber(decimal: portfolioValue / costBasis - 1).doubleValue) * 100
+    }
+    var gradedCount: Int = 0
+    var rawCount: Int { totalCards - gradedCount }
+
+    // Hits & rarity
+    var rookies: Int = 0
+    var autographs: Int = 0
+    var memorabilia: Int = 0
+    var numbered: Int = 0
+    var parallels: Int = 0
+
+    // Graders
+    var psa: Int = 0
+    var sgc: Int = 0
+    var bgs: Int = 0
+
+    // Value buckets
+    var v_1_24: Int = 0
+    var v_25_99: Int = 0
+    var v_100_499: Int = 0
+    var v_500_999: Int = 0
+    var v_1000_plus: Int = 0
+
+    // Freshness & hygiene
+    var new30d: Int = 0
+    var stale90d: Int = 0
+    var unpriced: Int = 0
+    var missingImages: Int = 0
+    var duplicateTuples: Int = 0
+}
+
+@MainActor
+final class StatsService {
+    private let ctx: NSManagedObjectContext
+    init(ctx: NSManagedObjectContext) { self.ctx = ctx }
+
+    func compute() throws -> CollectionStats {
+        var s = CollectionStats()
+        // Totals via count + SUM expressions
+        s.totalCards = try ctx.count(for: req(nil))
+
+        s.portfolioValue = try sumDecimal("estimatedValue")
+        s.costBasis     = try sumDecimal("purchasePrice")
+
+        // Graded vs raw
+        s.gradedCount = try ctx.count(for: req(NSPredicate(format: "gradeCompanyRaw != %d", GradingCompany.raw.rawValue)))
+
+        // Hits & rarity
+        s.rookies    = try ctx.count(for: req(NSPredicate(format: "rookie == YES")))
+        s.autographs = try ctx.count(for: req(NSPredicate(format: "autograph == YES")))
+        s.memorabilia = try ctx.count(for: req(NSPredicate(format: "memorabilia == YES")))
+        s.numbered   = try ctx.count(for: req(NSPredicate(format: "serialNumber != nil AND serialNumber != ''")))
+        s.parallels  = try ctx.count(for: req(NSPredicate(format: "parallel != nil AND parallel != ''")))
+
+        // Graders
+        s.psa = try ctx.count(for: req(NSPredicate(format: "gradeCompanyRaw == %d", GradingCompany.psa.rawValue)))
+        s.sgc = try ctx.count(for: req(NSPredicate(format: "gradeCompanyRaw == %d", GradingCompany.sgc.rawValue)))
+        s.bgs = try ctx.count(for: req(NSPredicate(format: "gradeCompanyRaw == %d", GradingCompany.bgs.rawValue)))
+
+        // Value buckets (treat nil as 0 by excluding nils)
+        s.v_1_24    = try ctx.count(for: req(NSPredicate(format: "estimatedValue >= 1 AND estimatedValue <= 24")))
+        s.v_25_99   = try ctx.count(for: req(NSPredicate(format: "estimatedValue >= 25 AND estimatedValue <= 99")))
+        s.v_100_499 = try ctx.count(for: req(NSPredicate(format: "estimatedValue >= 100 AND estimatedValue <= 499")))
+        s.v_500_999 = try ctx.count(for: req(NSPredicate(format: "estimatedValue >= 500 AND estimatedValue <= 999")))
+        s.v_1000_plus = try ctx.count(for: req(NSPredicate(format: "estimatedValue >= 1000")))
+
+        // Freshness (absolute date thresholds to avoid TZ mistakes)
+        let now = Date()
+        let days30 = Calendar.current.date(byAdding: .day, value: -30, to: now)!
+        let days90 = Calendar.current.date(byAdding: .day, value: -90, to: now)!
+        s.new30d   = try ctx.count(for: req(NSPredicate(format: "createdAt >= %@", days30 as NSDate)))
+        s.stale90d = try ctx.count(for: req(NSPredicate(format: "updatedAt < %@", days90 as NSDate)))
+
+        // Hygiene
+        s.unpriced      = try ctx.count(for: req(NSPredicate(format: "estimatedValue == nil")))
+        s.missingImages = try ctx.count(for: req(NSPredicate(format: "frontImagePath == nil OR frontImagePath == '' OR backImagePath == nil OR backImagePath == ''")))
+        s.duplicateTuples = try findDuplicateIdentityTuplesCount()
+
+        return s
+    }
+
+    private func req(_ predicate: NSPredicate?) -> NSFetchRequest<BaseballCard> {
+        let r: NSFetchRequest<BaseballCard> = BaseballCard.fetchRequest()
+        r.includesPropertyValues = false
+        r.includesSubentities = false
+        r.predicate = predicate
+        return r
+    }
+
+    private func sumDecimal(_ key: String) throws -> Decimal {
+        let fr = NSFetchRequest<NSDictionary>(entityName: "BaseballCard")
+        fr.resultType = .dictionaryResultType
+        let sum = NSExpressionDescription()
+        sum.name = "sum"
+        sum.expression = NSExpression(forFunction: "sum:", arguments: [NSExpression(forKeyPath: key)])
+        sum.expressionResultType = .decimalAttributeType
+        fr.propertiesToFetch = [sum]
+        let dict = try ctx.fetch(fr).first
+        let num = dict?["sum"] as? NSDecimalNumber ?? 0
+        return num.decimalValue
+    }
+
+    // Group by (year, brand, setName, cardNumber, playerName) to catch dupes
+    private func findDuplicateIdentityTuplesCount() throws -> Int {
+        let fr = NSFetchRequest<NSDictionary>(entityName: "BaseballCard")
+        fr.resultType = .dictionaryResultType
+        fr.propertiesToGroupBy = ["cardYear","brand","setName","cardNumber","playerName"]
+
+        let countDesc = NSExpressionDescription()
+        countDesc.name = "cnt"
+        countDesc.expression = NSExpression(forFunction: "count:", arguments: [NSExpression(forKeyPath: "id")])
+        countDesc.expressionResultType = .integer64AttributeType
+
+        fr.propertiesToFetch = ["cardYear","brand","setName","cardNumber","playerName", countDesc]
+
+        let rows = try ctx.fetch(fr)
+        return rows.reduce(0) { acc, row in
+            let c = (row["cnt"] as? Int) ?? 0
+            return acc + max(0, c - 1) // count extras beyond the first
+        }
+    }
+}
+
+
+// Isolate entire persistence layer to the main actor for concurrency safety.
+@MainActor
+struct PersistenceController {
+    static let model: NSManagedObjectModel = {
+        let model = NSManagedObjectModel()
+
+        let e = NSEntityDescription()
+        e.name = "BaseballCard"
+        e.managedObjectClassName = NSStringFromClass(BaseballCard.self)
+
+        func attr(_ name: String, _ type: NSAttributeType, optional: Bool = false, defaultValue: Any? = nil) -> NSAttributeDescription {
+            let a = NSAttributeDescription()
+            a.name = name
+            a.attributeType = type
+            a.isOptional = optional
+            a.defaultValue = defaultValue
+            return a
+        }
+
+        e.properties = [
+            // Identity & timestamps
+            attr("id", .UUIDAttributeType),
+            attr("createdAt", .dateAttributeType),
+            attr("updatedAt", .dateAttributeType),
+
+            // Canonical identity tuple
+            attr("playerName", .stringAttributeType),
+            attr("team", .stringAttributeType, optional: true),
+            attr("cardYear", .integer16AttributeType),
+            attr("brand", .stringAttributeType),
+            attr("setName", .stringAttributeType),
+            attr("subsetName", .stringAttributeType, optional: true),
+            attr("cardNumber", .stringAttributeType),
+
+            // Flags / variants
+            attr("rookie", .booleanAttributeType, defaultValue: false),
+            attr("parallel", .stringAttributeType, optional: true),
+            attr("serialNumber", .stringAttributeType, optional: true),
+            attr("autograph", .booleanAttributeType, defaultValue: false),
+            attr("memorabilia", .booleanAttributeType, defaultValue: false),
+
+            // Condition
+            attr("conditionEstimateRaw", .integer16AttributeType, defaultValue: 0),
+            attr("surfaceSub", .integer16AttributeType, defaultValue: 0),
+            attr("edgesSub", .integer16AttributeType, defaultValue: 0),
+            attr("cornersSub", .integer16AttributeType, defaultValue: 0),
+            attr("centeringSub", .integer16AttributeType, defaultValue: 0),
+
+            // Imaging
+            attr("frontImagePath", .stringAttributeType, optional: true),
+            attr("backImagePath", .stringAttributeType, optional: true),
+
+            // Purchase info
+            attr("purchasePrice", .decimalAttributeType, optional: true),
+            attr("purchaseDate", .dateAttributeType, optional: true),
+            attr("purchaseSource", .stringAttributeType, optional: true),
+
+            // Pricing
+            attr("estimatedValue", .decimalAttributeType, optional: true),
+
+            // Grading
+            attr("gradeCompanyRaw", .integer16AttributeType, defaultValue: 0),
+            attr("gradeLabel", .stringAttributeType, optional: true),
+            attr("gradeCertNumber", .stringAttributeType, optional: true),
+
+            // Misc
+            attr("notes", .stringAttributeType, optional: true)
+        ]
+
+        model.entities = [e]
+        return model
+    }()
+
+    static let shared = PersistenceController()
+
+    let container: NSPersistentContainer
+
+    init(inMemory: Bool = false) {
+        // The model name "project-inventory" is derived from your .xcodeproj file
+        container = NSPersistentContainer(name: "project-inventory", managedObjectModel: Self.model)
+        if inMemory {
+            container.persistentStoreDescriptions.first!.url = URL(fileURLWithPath: "/dev/null")
+        }
+        container.loadPersistentStores(completionHandler: { (storeDescription, error) in
+            if let error = error as NSError? {
+                // This is a critical error for a real app
+                fatalError("Unresolved error \(error), \(error.userInfo)")
+            }
+        })
+        container.viewContext.automaticallyMergesChangesFromParent = true
+    }
+    
+    // MARK: - SwiftUI Preview Support
+    static var preview: PersistenceController = {
+        let result = PersistenceController(inMemory: true)
+        let viewContext = result.container.viewContext
+        
+        // --- Create Sample Data ---
+        let card1 = BaseballCard.insert(
+            in: viewContext,
+            playerName: "Ken Griffey Jr.",
+            year: 1990,
+            brand: "Topps",
+            setName: "Base Set",
+            cardNumber: "336",
+            rookie: true
+        )
+        card1.estimatedValueDecimal = 45.00
+        card1.purchasePriceDecimal = 10.00
+        card1.gradeCompany = .psa
+        card1.gradeLabel = "9"
+
+        let card2 = BaseballCard.insert(
+            in: viewContext,
+            playerName: "Frank Thomas",
+            year: 1990,
+            brand: "Topps",
+            setName: "Base Set",
+            cardNumber: "414",
+            rookie: true
+        )
+        card2.estimatedValueDecimal = 120.00
+        card2.purchasePriceDecimal = 30.00
+        card2.gradeCompany = .raw
+        card2.conditionEstimate = .mint
+
+        let card3 = BaseballCard.insert(
+            in: viewContext,
+            playerName: "Nolan Ryan",
+            year: 1991,
+            brand: "Topps",
+            setName: "Desert Shield",
+            cardNumber: "1",
+            team: "Rangers"
+        )
+        card3.estimatedValueDecimal = 8.00
+        card3.autograph = true
+        // --- End Sample Data ---
+        
+        do {
+            try viewContext.save()
+        } catch {
+            let nsError = error as NSError
+            fatalError("Unresolved error \(nsError), \(nsError.userInfo)")
+        }
+        return result
+    }()
+}
+
+
+// MARK: - Main Dashboard View
+
+struct DashboardView: View {
+    @Environment(\.managedObjectContext) private var ctx
+    @StateObject private var viewModel: DashboardViewModel
+
+    init(context: NSManagedObjectContext) {
+        _viewModel = StateObject(wrappedValue: DashboardViewModel(context: context))
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let stats = viewModel.stats {
+                    List {
+                        HeroStatsSection(stats: stats)
+                        HitsAndRaritySection(stats: stats)
+                        GradingSection(stats: stats)
+                        ValueBucketsSection(stats: stats)
+                        DataHygieneSection(stats: stats)
+                    }
+                    #if os(iOS)
+                    .listStyle(.insetGrouped)
+                    #else
+                    .listStyle(.inset)
+                    #endif
+                } else if viewModel.error != nil {
+                    ContentUnavailableView("Error", systemImage: "xmark.octagon", description: Text("Could not compute statistics."))
+                } else {
+                    ProgressView()
+                }
+            }
+            .navigationTitle("Dashboard")
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        viewModel.refresh()
+                    } label: {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
+                }
+            }
+            .onAppear {
+                viewModel.refresh()
+            }
+        }
+    }
+}
+
+// MARK: - View Sections
+
+private struct HeroStatsSection: View {
+    let stats: CollectionStats
+
+    var body: some View {
+        Section(header: Text("Key Metrics")) {
+            StatRow(label: "Total Cards", value: "\(stats.totalCards)")
+            StatRow(label: "Portfolio Value", value: stats.portfolioValue)
+            StatRow(label: "Cost Basis", value: stats.costBasis)
+            StatRow(label: "Unrealized P/L", value: stats.unrealizedPL, positive: .green, negative: .red)
+            StatRow(label: "Return on Investment", value: String(format: "%.1f%%", stats.roiPercent))
+            StatRow(label: "Graded / Raw", value: "\(stats.gradedCount) / \(stats.rawCount)")
+        }
+    }
+}
+
+private struct HitsAndRaritySection: View {
+    let stats: CollectionStats
+
+    var body: some View {
+        Section(header: Text("Hits & Rarity")) {
+            StatRow(label: "Rookies", value: "\(stats.rookies)")
+            StatRow(label: "Autographs", value: "\(stats.autographs)")
+            StatRow(label: "Memorabilia", value: "\(stats.memorabilia)")
+            StatRow(label: "Serial Numbered", value: "\(stats.numbered)")
+            StatRow(label: "Parallels", value: "\(stats.parallels)")
+        }
+    }
+}
+
+private struct GradingSection: View {
+    let stats: CollectionStats
+
+    var body: some View {
+        Section(header: Text("Top Graders")) {
+            StatRow(label: "PSA", value: "\(stats.psa)")
+            StatRow(label: "SGC", value: "\(stats.sgc)")
+            StatRow(label: "BGS", value: "\(stats.bgs)")
+        }
+    }
+}
+
+private struct ValueBucketsSection: View {
+    let stats: CollectionStats
+
+    var body: some View {
+        Section(header: Text("Value Tiers (by Est. Value)")) {
+            StatRow(label: "$1,000+", value: "\(stats.v_1000_plus)")
+            StatRow(label: "$500 – $999", value: "\(stats.v_500_999)")
+            StatRow(label: "$100 – $499", value: "\(stats.v_100_499)")
+            StatRow(label: "$25 – $99", value: "\(stats.v_25_99)")
+            StatRow(label: "$1 – $24", value: "\(stats.v_1_24)")
+        }
+    }
+}
+
+private struct DataHygieneSection: View {
+    let stats: CollectionStats
+
+    var body: some View {
+        Section(header: Text("Data Health")) {
+            StatRow(label: "Unpriced Cards", value: "\(stats.unpriced)", intent: .warning)
+            StatRow(label: "Cards Missing Images", value: "\(stats.missingImages)", intent: .warning)
+            StatRow(label: "Duplicate Entries Found", value: "\(stats.duplicateTuples)", intent: .critical)
+            // **FIXED**: Changed stale9d to stale90d
+            StatRow(label: "Prices >90d old", value: "\(stats.stale90d)")
+        }
+    }
+}
+
+
+// MARK: - UI Components
+
+private enum StatIntent { case normal, warning, critical }
+
+private struct StatRow: View {
+    let label: String
+    let value: String
+    let valueColor: Color
+
+    // Init for simple strings
+    init(label: String, value: String, intent: StatIntent = .normal) {
+        self.label = label
+        self.value = value
+        
+        switch intent {
+        case .normal: self.valueColor = .secondary
+        case .warning: self.valueColor = Color.orange
+        case .critical: self.valueColor = Color.red
+        }
+    }
+    
+    // Init for Decimals (like currency)
+    init(label: String, value: Decimal, positive: Color = .primary, negative: Color = .primary) {
+        self.label = label
+        self.value = value.formatted(.currency(code: "USD"))
+        
+        if value > 0 {
+            self.valueColor = positive
+        } else if value < 0 {
+            self.valueColor = negative
+        } else {
+            self.valueColor = .secondary
+        }
+    }
+
+    var body: some View {
+        HStack {
+            Text(label)
+            Spacer()
+            Text(value)
+                .foregroundStyle(valueColor)
+                .font(.system(.body, design: .monospaced))
+        }
+    }
+}
+
+
+// MARK: - ViewModel
+
+@MainActor
+final class DashboardViewModel: ObservableObject {
+    @Published var stats: CollectionStats?
+    @Published var error: Error?
+    private let statsService: StatsService
+
+    init(context: NSManagedObjectContext) {
+        self.statsService = StatsService(ctx: context)
+    }
+
+    func refresh() {
+        Task { @MainActor in
+            do {
+                self.stats = try statsService.compute()
+                self.error = nil
+            } catch {
+                self.error = error
+                self.stats = nil
+            }
+        }
+    }
+}
+
+// MARK: - Value Model & Condition Enum
+
+public enum CardCondition: String, CaseIterable, Codable, CustomStringConvertible {
+    case mint = "Mint"
+    case nearMint = "Near Mint"
+    case excellent = "Excellent"
+    case veryGood = "Very Good"
+    case good = "Good"
+    case fair = "Fair"
+    case poor = "Poor"
+
+    public var description: String { rawValue }
+
+    // Bridge to existing ConditionEstimate used by Core Data
+    var estimate: ConditionEstimate {
+        switch self {
+        case .mint: return .mint
+        case .nearMint: return .nearMint
+        case .excellent: return .excellent
+        case .veryGood: return .veryGood
+        case .good: return .good
+        case .fair: return .fair
+        case .poor: return .poor
+        }
+    }
+
+    init(from estimate: ConditionEstimate) {
+        switch estimate {
+        case .gemMint, .mint: self = .mint
+        case .nearMint, .nmMt, .exMt: self = .nearMint
+        case .excellent: self = .excellent
+        case .veryGood: self = .veryGood
+        case .good: self = .good
+        case .fair: self = .fair
+        default: self = .poor
+        }
+    }
+}
+
+// MARK: - Core Data Manager
+
+@MainActor
+final class CoreDataManager {
+    let context: NSManagedObjectContext
+    init(context: NSManagedObjectContext) { self.context = context }
+
+    // CRUD
+    @discardableResult
+    func create(from model: BaseballCardModel) throws -> BaseballCard {
+        let obj = BaseballCard(context: context)
+        model.apply(to: obj)
+        if obj.createdAt == Date.distantPast || obj.createdAt == .distantFuture { obj.createdAt = Date() }
+        obj.updatedAt = Date()
+        try save()
+        return obj
+    }
+
+    func fetchAll(sortedBy sort: CardSort = .yearDesc) throws -> [BaseballCard] {
+        let req: NSFetchRequest<BaseballCard> = BaseballCard.fetchRequest()
+        req.sortDescriptors = sort.descriptors
+        return try context.fetch(req)
+    }
+
+    func fetch(using filter: CardFilter, sort: CardSort) throws -> [BaseballCard] {
+        let req: NSFetchRequest<BaseballCard> = BaseballCard.fetchRequest()
+        req.predicate = filter.predicate()
+        req.sortDescriptors = sort.descriptors
+        return try context.fetch(req)
+    }
+
+    func delete(_ obj: BaseballCard) throws {
+        context.delete(obj)
+        try save()
+    }
+
+    func save() throws {
+        if context.hasChanges { try context.save() }
+    }
+
+    // Search helpers
+    func search(text: String) throws -> [BaseballCard] {
+        var f = CardFilter()
+        f.text = text
+        return try fetch(using: f, sort: .playerAZ)
+    }
+}
+
+// MARK: - Validation Service
+
+struct ValidationService {
+    enum ValidationError: LocalizedError, Equatable {
+        case playerName(String)
+        case cardYear(String)
+        case cardSet(String)
+        case cardNumber(String)
+        case estimatedValue(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .playerName(let m): return m
+            case .cardYear(let m): return m
+            case .cardSet(let m): return m
+            case .cardNumber(let m): return m
+            case .estimatedValue(let m): return m
+            }
+        }
+    }
+
+    func validatePlayerName(_ s: String) -> ValidationError? {
+        guard !s.isEmpty else { return .playerName("Player name is required.") }
+        guard s.count <= 50 else { return .playerName("Max 50 characters.") }
+        let ok = s.range(of: "^[A-Za-z ]+$", options: .regularExpression) != nil
+        return ok ? nil : .playerName("Letters and spaces only.")
+    }
+
+    func validateYear(_ y: Int) -> ValidationError? {
+        (1990...1995).contains(y) ? nil : .cardYear("Year must be between 1990 and 1995.")
+    }
+
+    func validateSet(_ s: String) -> ValidationError? {
+        guard !s.isEmpty else { return .cardSet("Set is required.") }
+        return s.count <= 30 ? nil : .cardSet("Max 30 characters.")
+    }
+
+    func validateCardNumber(_ s: String?) -> ValidationError? {
+        guard let s = s, !s.isEmpty else { return nil }
+        let ok = s.count <= 10 && (s.range(of: "^[A-Za-z0-9]+$", options: .regularExpression) != nil)
+        return ok ? nil : .cardNumber("Alphanumeric up to 10 chars.")
+    }
+
+    func validateEstimatedValue(_ s: String?) -> ValidationError? {
+        guard let s = s, !s.isEmpty else { return nil }
+        let pattern = "^(?:\\d{1,4}|\\d{1,4}\\.\\d{1,2})$" // up to 9999.99
+        guard s.range(of: pattern, options: .regularExpression) != nil else {
+            return .estimatedValue("Max $9,999.99 with up to 2 decimals.")
+        }
+        if let dec = Decimal(string: s), dec > 0 { return nil }
+        return .estimatedValue("Must be a positive amount.")
+    }
+}
+
+// MARK: - Inventory ViewModel
+
+@MainActor
+final class CardInventoryViewModel: ObservableObject {
+    @Published var items: [BaseballCard] = []
+    @Published var search: String = ""
+    @Published var isLoading = false
+    @Published var isEmpty = false
+
+    private let manager: CoreDataManager
+
+    init(context: NSManagedObjectContext) {
+        self.manager = CoreDataManager(context: context)
+    }
+
+    func load(filter: CardFilter = CardFilter(), sort: CardSort = .yearDesc) {
+        isLoading = true
+        do {
+            items = try manager.fetch(using: filter, sort: sort)
+            isEmpty = items.isEmpty
+        } catch {
+            items = []
+            isEmpty = true
+        }
+        isLoading = false
+    }
+
+    func searchNow() { load(filter: { var f = CardFilter(); f.text = search; return f }()) }
+}
+
+// MARK: - Form ViewModel
+
+@MainActor
+final class CardFormViewModel: ObservableObject {
+    // Inputs
+    @Published var playerName: String = ""
+    @Published var year: Int = 1990
+    @Published var brand: String = ""
+    @Published var setName: String = ""
+    @Published var cardNumber: String = ""
+    @Published var team: String = ""
+    @Published var condition: CardCondition = .nearMint
+    @Published var rookie: Bool = false
+    @Published var autograph: Bool = false
+    @Published var memorabilia: Bool = false
+    @Published var estimatedValueText: String = ""
+
+    // Errors
+    @Published var errors: [ValidationService.ValidationError] = []
+
+    private let manager: CoreDataManager
+    private let validator = ValidationService()
+
+    init(context: NSManagedObjectContext) {
+        self.manager = CoreDataManager(context: context)
+    }
+
+    func validate() -> Bool {
+        var errs: [ValidationService.ValidationError] = []
+        if let e = validator.validatePlayerName(playerName) { errs.append(e) }
+        if let e = validator.validateYear(year) { errs.append(e) }
+        if let e = validator.validateSet(setName) { errs.append(e) }
+        if let e = validator.validateCardNumber(cardNumber) { errs.append(e) }
+        if let e = validator.validateEstimatedValue(estimatedValueText) { errs.append(e) }
+        errors = errs
+        return errs.isEmpty
+    }
+
+    func save() throws {
+        guard validate() else { return }
+        var model = BaseballCardModel(
+            playerName: playerName,
+            cardYear: year,
+            brand: brand,
+            setName: setName,
+            cardNumber: cardNumber.isEmpty ? "-" : cardNumber
+        )
+        model.team = team.isEmpty ? nil : team
+        model.rookie = rookie
+        model.autograph = autograph
+        model.memorabilia = memorabilia
+        if !estimatedValueText.isEmpty { model.estimatedValue = Decimal(string: estimatedValueText) }
+        try manager.create(from: model)
+    }
+}
+
+// MARK: - Add / Edit / Detail Views
+
+private struct AddCardView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.managedObjectContext) private var ctx
+    @StateObject private var vm: CardFormViewModel
+
+    init() {
+        _vm = StateObject(wrappedValue: CardFormViewModel(context: PersistenceController.shared.container.viewContext))
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Player") {
+                    TextField("Name", text: $vm.playerName)
+                }
+                Section("Details") {
+                    Picker("Year", selection: $vm.year) {
+                        ForEach(1990...1995, id: \.self) { Text("\($0)").tag($0) }
+                    }
+                    TextField("Brand", text: $vm.brand)
+                    TextField("Set", text: $vm.setName)
+                    TextField("Card #", text: $vm.cardNumber)
+                }
+                Section("Condition & Flags") {
+                    Picker("Condition", selection: $vm.condition) {
+                        ForEach(CardCondition.allCases, id: \.self) { Text($0.description).tag($0) }
+                    }
+                    Toggle("Rookie", isOn: $vm.rookie)
+                    Toggle("Autograph", isOn: $vm.autograph)
+                    Toggle("Memorabilia", isOn: $vm.memorabilia)
+                }
+                Section("Pricing") {
+                    TextField("Estimated Value", text: $vm.estimatedValueText)
+                    #if os(iOS)
+                    .keyboardType(.decimalPad)
+                    #endif
+                }
+
+                if !vm.errors.isEmpty {
+                    Section("Issues") {
+                        ForEach(vm.errors, id: \.errorDescription) { err in
+                            Text(err.errorDescription ?? "").foregroundStyle(.red)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Add Card")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        do { try vm.save(); dismiss() } catch { }
+                    }
+                    .disabled(!vm.validate())
+                }
+            }
+        }
+    }
+}
+
+private struct CardDetailView: View {
+    let card: BaseballCard
+    var body: some View {
+        Form {
+            Section("Summary") {
+                Text(card.playerName).font(.title3)
+                Text("\(card.cardYear) • \(card.brand) • \(card.setName) #\(card.cardNumber)")
+                Text(card.gradeDisplay).foregroundStyle(.secondary)
+            }
+            Section("Flags") {
+                LabeledContent("Rookie", value: card.rookie ? "Yes" : "No")
+                LabeledContent("Autograph", value: card.autograph ? "Yes" : "No")
+                LabeledContent("Memorabilia", value: card.memorabilia ? "Yes" : "No")
+            }
+            Section("Value") {
+                let s = card.estimatedValue?.stringValue ?? "—"
+                LabeledContent("Estimated", value: "$\(s)")
+            }
+        }
+        .navigationTitle("Card Detail")
+    }
+}
+
+import SwiftUI
+import Foundation
+
+extension BaseballCardModel {
+    // Optional analytics/AI fields (non-persistent; used by assistant/UI)
+    public var marketTrend: String? { return nil }
+    public var performancePercent: Double? { return nil }
+    public var currentMarketValue: Decimal? { return estimatedValue }
+    public var acquisitionCost: Decimal? { return purchasePrice }
+    
+    // Display helpers expected by assistant
+    public var gradeDisplay: String {
+        let company = gradeCompany == .raw ? "RAW" : gradeCompany.description
+        if let g = gradeLabel, !g.isEmpty { return "\(company) \(g)" }
+        return company
+    }
+    
+    public var conditionEstimate: String { condition.description }
+}
+
+// Enhanced AI Assistant with 100 Capabilities
+@MainActor
+class EnhancedAIAssistant: ObservableObject {
+    @Published var isProcessing = false
+    @Published var responses: [AIResponse] = []
+    @Published var voiceEnabled = false
+    
+    // MARK: - Core AI Capabilities (1-15)
+    
+    // 1. Contextual Q&A
+    func contextualQuery(_ query: String, cards: [BaseballCardModel]) async -> String {
+        isProcessing = true
+        defer { isProcessing = false }
+        
+        let lowercaseQuery = query.lowercased()
+        
+        if lowercaseQuery.contains("average roi") && lowercaseQuery.contains("starts with m") {
+            let mPlayers = cards.filter { $0.playerName.lowercased().hasPrefix("m") }
+            let avgROI = calculateAverageROI(mPlayers)
+            return "Your average ROI on players whose last name starts with M is \(String(format: "%.1f", avgROI))%"
+        }
+        
+        return "I can analyze your specific inventory data. Try asking about ROI, values, or specific players."
+    }
+    
+    // 2. Summary Generation
+    func generateMarketSummary(for card: BaseballCardModel) async -> String {
+        return """
+        \(card.playerName) (\(card.cardYear) \(card.brand)) has shown \(card.marketTrend ?? "stable") market activity over 90 days. 
+        Current value: $\(card.currentMarketValue ?? 0). Recent sales indicate \(getMarketSentiment(card)) collector interest 
+        with \(getPriceVolatility(card)) price volatility. Recommendation: \(getActionRecommendation(card)).
+        """
+    }
+    
+    // 3. Actionable Insights
+    func generateActionableInsights(cards: [BaseballCardModel]) -> String {
+        let sellCandidates = cards.filter { ($0.performancePercent ?? 0) > 50 }.count
+        let gradeCandidates = cards.filter { $0.gradeCompany == .raw && ($0.estimatedValue ?? 0) > 100 }.count
+        let researchNeeded = cards.filter { $0.marketTrend == "Rising" }.count
+        
+        return "AI recommends: Sell \(min(sellCandidates, 3)) cards, grade \(min(gradeCandidates, 5)), research \(min(researchNeeded, 2))"
+    }
+    
+    // 4. Draft Listing Copy
+    func generateListingCopy(for card: BaseballCardModel) -> ListingCopy {
+        let title = "\(card.cardYear) \(card.brand) \(card.playerName) #\(card.cardNumber) \(card.gradeDisplay) \(card.rookie ? "ROOKIE" : "")"
+        
+        let description = """
+        \(card.rookie ? "ROOKIE CARD! " : "")\(card.playerName) from the iconic \(card.cardYear) \(card.brand) set. 
+        \(card.gradeCompany != .raw ? "Professionally graded \(card.gradeDisplay)" : "Raw card in \(card.conditionEstimate) condition").
+        \(card.serialNumber != nil ? "Serial numbered \(card.serialNumber!)." : "")
+        Perfect for any \(card.team ?? "baseball") collection!
+        """
+        
+        return ListingCopy(title: title, description: description)
+    }
+    
+    // 5. Formula Generation
+    func generateFormula(_ request: String) -> String {
+        if request.lowercased().contains("profit margin") && request.lowercased().contains("ebay fee") {
+            return "Profit Margin = ((Sale Price - (Sale Price × 0.13) - Purchase Price) / Purchase Price) × 100"
+        }
+        return "Formula generated based on your request"
+    }
+    
+    // 6. Trend Forecasting
+    func forecastValue(for card: BaseballCardModel, days: Int) -> ValueForecast {
+        let currentValue = card.currentMarketValue ?? 0
+        let trend = card.marketTrend ?? "Stable"
+        
+        let multiplier: Double = {
+            switch (trend, days) {
+            case ("Rising", 30):  return 1.05
+            case ("Rising", 90):  return 1.15
+            case ("Rising", 180): return 1.25
+            case ("Falling", 30): return 0.95
+            case ("Falling", 90): return 0.85
+            case ("Falling", 180):return 0.75
+            default:              return 1.0
+            }
+        }()
+        
+        let forecastValue = currentValue * Decimal(multiplier)
+        let confidence = trend == "Stable" ? 0.8 : 0.6
+        
+        return ValueForecast(
+            days: days,
+            predictedValue: forecastValue,
+            confidence: confidence,
+            range: (forecastValue * 0.9, forecastValue * 1.1)
+        )
+    }
+    
+    // 7. Slab Text Reader (Computer Vision)
+    func readSlabText(from image: Data) async -> SlabData? {
+        // Simulate OCR processing
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        
+        return SlabData(
+            certNumber: "12345678",
+            grade: "10",
+            subGrades: ["Centering": "10", "Corners": "10", "Edges": "9.5", "Surface": "10"],
+            company: "PSA"
+        )
+    }
+    
+    // 8. News Impact Analysis
+    func analyzeNewsImpact(_ newsText: String, player: String) -> NewsImpact {
+        let sentiment = analyzeSentiment(newsText)
+        let keywords = extractKeywords(newsText)
+        
+        let impactScore: Int = {
+            if keywords.contains(where: { ["mvp", "award", "record"].contains($0.lowercased()) }) { return 4 }
+            if keywords.contains(where: { ["injury", "suspension", "trade"].contains($0.lowercased()) }) { return -3 }
+            return 0
+        }()
+        
+        return NewsImpact(
+            player: player,
+            impactScore: impactScore,
+            sentiment: sentiment,
+            summary: "News analysis suggests \(impactScore > 0 ? "positive" : impactScore < 0 ? "negative" : "neutral") market impact"
+        )
+    }
+    
+    // 9. Voice Command Processing
+    func processVoiceCommand(_ command: String, cards: [BaseballCardModel]) async -> String {
+        let components = command.lowercased().components(separatedBy: " ")
+        
+        if components.contains("add") && components.contains("for") && components.contains("sale") {
+            return "Added PSA 10 Ohtani to 'For Sale' folder and set price 5% above 7-day average ($127.50)"
+        }
+        
+        return "Voice command processed. What would you like me to do next?"
+    }
+    
+    // 10. Competitor Analysis
+    func analyzeCompetitor(_ sellerName: String) async -> CompetitorAnalysis {
+        return CompetitorAnalysis(
+            sellerName: sellerName,
+            strategy: "Focusing on low-pop parallels and vintage HOF",
+            avgSalePrice: 245.50,
+            volumeTrend: "Increasing",
+            recommendation: "Consider similar low-pop parallel strategy"
+        )
+    }
+    
+    // Helper functions
+    private func calculateAverageROI(_ cards: [BaseballCardModel]) -> Double {
+        let validCards = cards.compactMap { $0.performancePercent }
+        return validCards.isEmpty ? 0 : validCards.reduce(0, +) / Double(validCards.count)
+    }
+    
+    private func getMarketSentiment(_ card: BaseballCardModel) -> String {
+        switch card.marketTrend {
+        case "Rising": return "strong"
+        case "Falling": return "declining"
+        default: return "steady"
+        }
+    }
+    
+    private func getPriceVolatility(_ card: BaseballCardModel) -> String {
+        return card.rookie ? "moderate" : "low"
+    }
+    
+    private func getActionRecommendation(_ card: BaseballCardModel) -> String {
+        if card.marketTrend == "Rising" { return "Hold for continued growth" }
+        if card.marketTrend == "Falling" { return "Consider selling if profit target met" }
+        return "Monitor for trend changes"
+    }
+    
+    private func analyzeSentiment(_ text: String) -> String {
+        let positiveWords = ["award", "mvp", "record", "excellent", "outstanding"]
+        let negativeWords = ["injury", "suspension", "poor", "decline", "struggle"]
+        
+        let words = text.lowercased().components(separatedBy: .whitespacesAndNewlines)
+        let positiveCount = words.filter { positiveWords.contains($0) }.count
+        let negativeCount = words.filter { negativeWords.contains($0) }.count
+        
+        if positiveCount > negativeCount { return "Positive" }
+        if negativeCount > positiveCount { return "Negative" }
+        return "Neutral"
+    }
+    
+    private func extractKeywords(_ text: String) -> [String] {
+        let keywords = ["mvp", "award", "record", "injury", "suspension", "trade", "rookie", "hall of fame"]
+        return text.lowercased().components(separatedBy: .whitespacesAndNewlines)
+            .filter { keywords.contains($0) }
+    }
+}
+
+// Data Models
+struct AIResponse: Identifiable {
+    let id = UUID()
+    let query: String
+    let response: String
+    let timestamp: Date
+    let capability: AICapability
+}
+
+struct ListingCopy {
+    let title: String
+    let description: String
+}
+
+struct ValueForecast {
+    let days: Int
+    let predictedValue: Decimal
+    let confidence: Double
+    let range: (Decimal, Decimal)
+}
+
+struct SlabData {
+    let certNumber: String
+    let grade: String
+    let subGrades: [String: String]
+    let company: String
+}
+
+struct NewsImpact {
+    let player: String
+    let impactScore: Int // -5 to +5
+    let sentiment: String
+    let summary: String
+}
+
+struct CompetitorAnalysis {
+    let sellerName: String
+    let strategy: String
+    let avgSalePrice: Double
+    let volumeTrend: String
+    let recommendation: String
+}
+
+enum AICapability: String, CaseIterable {
+    case contextualQA = "Contextual Q&A"
+    case summaryGeneration = "Summary Generation"
+    case actionableInsights = "Actionable Insights"
+    case listingCopy = "Listing Copy"
+    case formulaGeneration = "Formula Generation"
+    case trendForecasting = "Trend Forecasting"
+    case slabReader = "Slab Text Reader"
+    case newsAnalysis = "News Impact Analysis"
+    case voiceCommand = "Voice Command"
+    case competitorAnalysis = "Competitor Analysis"
+}
+
+@MainActor
+class AIAssistant: ObservableObject {
+    @Published var conversations: [Conversation] = []
+    @Published var currentConversation: Conversation?
+    @Published var isTyping = false
+    @Published var suggestions: [Suggestion] = []
+    @Published var userProfile: UserProfile = UserProfile()
+    @Published var learningInsights: [LearningInsight] = []
+    
+    private let personalityTraits = PersonalityTraits()
+    
+    struct Conversation {
+        let id = UUID()
+        var messages: [Message]
+        let startedAt: Date
+        var lastMessageAt: Date
+        let topic: ConversationTopic
+        
+        enum ConversationTopic {
+            case general, cardValuation, marketAdvice, collectionStrategy, authentication, grading
+            
+            var icon: String {
+                switch self {
+                case .general: return "bubble.left.and.bubble.right"
+                case .cardValuation: return "dollarsign.circle"
+                case .marketAdvice: return "chart.line.uptrend.xyaxis"
+                case .collectionStrategy: return "target"
+                case .authentication: return "checkmark.shield"
+                case .grading: return "star.circle"
+                }
+            }
+        }
+    }
+    
+    struct Message {
+        let id = UUID()
+        let content: String
+        let sender: MessageSender
+        let timestamp: Date
+        let type: MessageType
+        let attachments: [MessageAttachment]
+        
+        enum MessageSender {
+            case user, assistant
+        }
+        
+        enum MessageType {
+            case text, cardRecommendation, marketAlert, insight, action
+        }
+        
+        struct MessageAttachment {
+            let type: AttachmentType
+            let data: Any
+            
+            enum AttachmentType {
+                case card, chart, image, link
+            }
+        }
+    }
+    
+    struct Suggestion {
+        let id = UUID()
+        let title: String
+        let description: String
+        let category: SuggestionCategory
+        let priority: Priority
+        let actionable: Bool
+        let relatedCards: [BaseballCardModel]
+        let estimatedImpact: String
+        
+        enum SuggestionCategory {
+            case buying, selling, grading, organizing, learning
+            
+            var icon: String {
+                switch self {
+                case .buying: return "plus.circle.fill"
+                case .selling: return "minus.circle.fill"
+                case .grading: return "star.circle.fill"
+                case .organizing: return "folder.fill"
+                case .learning: return "book.fill"
+                }
+            }
+            
+            var color: Color {
+                switch self {
+                case .buying: return .green
+                case .selling: return .red
+                case .grading: return .yellow
+                case .organizing: return .blue
+                case .learning: return .purple
+                }
+            }
+            
+            var displayName: String {
+                switch self {
+                case .buying: return "Buying"
+                case .selling: return "Selling"
+                case .grading: return "Grading"
+                case .organizing: return "Organizing"
+                case .learning: return "Learning"
+                }
+            }
+        }
+        
+        enum Priority {
+            case low, medium, high, urgent
+            
+            var color: Color {
+                switch self {
+                case .low: return .gray
+                case .medium: return .blue
+                case .high: return .orange
+                case .urgent: return .red
+                }
+            }
+        }
+    }
+    
+    struct UserProfile {
+        var preferences: CollectionPreferences = CollectionPreferences()
+        var behavior: BehaviorPattern = BehaviorPattern()
+        var goals: [CollectionGoal] = []
+        var expertise: ExpertiseLevel = .beginner
+        var communicationStyle: CommunicationStyle = .friendly
+        
+        struct CollectionPreferences {
+            var favoriteTeams: [String] = []
+            var favoritePlayers: [String] = []
+            var preferredBrands: [String] = []
+            var preferredYears: [Int] = []
+            var budgetRange: ClosedRange<Decimal> = 0...1000
+            var riskTolerance: RiskTolerance = .moderate
+            var investmentHorizon: InvestmentHorizon = .medium
+            
+            enum RiskTolerance {
+                case conservative, moderate, aggressive
+            }
+            
+            enum InvestmentHorizon {
+                case short, medium, long // < 1 year, 1-5 years, > 5 years
+            }
+        }
+        
+        struct BehaviorPattern {
+            var averageSessionDuration: TimeInterval = 0
+            var mostActiveTimeOfDay: Int = 12 // Hour of day
+            var frequentActions: [String] = []
+            var searchPatterns: [String] = []
+            var purchaseFrequency: PurchaseFrequency = .monthly
+            
+            enum PurchaseFrequency {
+                case daily, weekly, monthly, quarterly, rarely
+            }
+        }
+        
+        struct CollectionGoal {
+            let id = UUID()
+            let title: String
+            let description: String
+            let targetDate: Date
+            let progress: Double // 0.0 to 1.0
+            let type: GoalType
+            
+            enum GoalType {
+                case cardCount, totalValue, specificCard, completeSet, gradeImprovement
+            }
+        }
+        
+        enum ExpertiseLevel {
+            case beginner, intermediate, advanced, expert
+            
+            var description: String {
+                switch self {
+                case .beginner: return "New to collecting"
+                case .intermediate: return "Some experience"
+                case .advanced: return "Experienced collector"
+                case .expert: return "Expert collector"
+                }
+            }
+        }
+        
+        enum CommunicationStyle {
+            case formal, friendly, casual, technical
+        }
+    }
+    
+    struct LearningInsight {
+        let id = UUID()
+        let category: InsightCategory
+        let title: String
+        let description: String
+        let confidence: Double
+        let learnedAt: Date
+        let applicableScenarios: [String]
+        
+        enum InsightCategory {
+            case userPreference, marketPattern, behaviorTrend, collectionGap
+        }
+    }
+    
+    struct PersonalityTraits {
+        let name = "Casey"
+        let personality = "Knowledgeable, friendly, and enthusiastic about baseball cards"
+        let expertise = ["Market analysis", "Card authentication", "Investment strategy", "Collection organization"]
+        let communicationStyle = "Conversational but informative, uses baseball terminology naturally"
+    }
+    
+    init() {
+        setupInitialSuggestions()
+        startNewConversation(topic: .general)
+    }
+    
+    func sendMessage(_ content: String) async {
+        guard let conversation = currentConversation else { return }
+        
+        // Add user message
+        let userMessage = Message(
+            content: content,
+            sender: .user,
+            timestamp: Date(),
+            type: .text,
+            attachments: []
+        )
+        
+        addMessage(userMessage, to: conversation.id)
+        
+        // Generate AI response
+        isTyping = true
+        
+        do {
+            let response = try await generateResponse(to: content, conversation: conversation)
+            let assistantMessage = Message(
+                content: response.content,
+                sender: .assistant,
+                timestamp: Date(),
+                type: response.type,
+                attachments: response.attachments
+            )
+            
+            addMessage(assistantMessage, to: conversation.id)
+            
+            // Learn from interaction
+            await learnFromInteraction(userMessage: content, context: conversation)
+            
+        } catch {
+            let errorMessage = Message(
+                content: "I'm sorry, I'm having trouble processing that right now. Could you try rephrasing your question?",
+                sender: .assistant,
+                timestamp: Date(),
+                type: .text,
+                attachments: []
+            )
+            addMessage(errorMessage, to: conversation.id)
+        }
+        
+        isTyping = false
+    }
+    
+    private func generateResponse(to message: String, conversation: Conversation) async throws -> (content: String, type: Message.MessageType, attachments: [Message.MessageAttachment]) {
+        
+        // Simulate AI processing time
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        
+        let lowercaseMessage = message.lowercased()
+        
+        // Card valuation queries
+        if lowercaseMessage.contains("value") || lowercaseMessage.contains("worth") || lowercaseMessage.contains("price") {
+            return generateValuationResponse(message: message)
+        }
+        
+        // Market advice queries
+        if lowercaseMessage.contains("market") || lowercaseMessage.contains("invest") || lowercaseMessage.contains("buy") || lowercaseMessage.contains("sell") {
+            return generateMarketAdviceResponse(message: message)
+        }
+        
+        // Authentication queries
+        if lowercaseMessage.contains("authentic") || lowercaseMessage.contains("fake") || lowercaseMessage.contains("real") {
+            return generateAuthenticationResponse(message: message)
+        }
+        
+        // Grading queries
+        if lowercaseMessage.contains("grade") || lowercaseMessage.contains("condition") || lowercaseMessage.contains("psa") || lowercaseMessage.contains("bgs") {
+            return generateGradingResponse(message: message)
+        }
+        
+        // Collection strategy
+        if lowercaseMessage.contains("collect") || lowercaseMessage.contains("strategy") || lowercaseMessage.contains("focus") {
+            return generateCollectionStrategyResponse(message: message)
+        }
+        
+        // General conversation
+        return generateGeneralResponse(message: message)
+    }
+    
+    private func generateValuationResponse(message: String) -> (content: String, type: Message.MessageType, attachments: [Message.MessageAttachment]) {
+        let responses = [
+            "Card values can vary significantly based on condition, rarity, and market demand. For the most accurate valuation, I'd recommend checking recent sold listings on eBay or consulting professional price guides like Beckett.",
+            "Great question about card values! The key factors that affect a card's worth are: condition (mint cards are worth much more), player popularity, card rarity, and current market trends. What specific card are you curious about?",
+            "Valuing cards is both an art and a science! I can help you understand the factors that drive prices. Recent sales data is usually the best indicator - would you like me to walk you through how to research comparable sales?"
+        ]
+        
+        return (
+            content: responses.randomElement() ?? responses[0],
+            type: .text,
+            attachments: []
+        )
+    }
+    
+    private func generateMarketAdviceResponse(message: String) -> (content: String, type: Message.MessageType, attachments: [Message.MessageAttachment]) {
+        let responses = [
+            "The baseball card market has been quite dynamic lately! Rookie cards from the early 1990s are seeing renewed interest. Based on your collection, I'd suggest focusing on high-grade examples of key players from that era.",
+            "Market timing is crucial in card collecting. Right now, I'm seeing strong demand for graded cards, especially PSA 9s and 10s. If you have raw cards in excellent condition, it might be worth considering professional grading.",
+            "Investment-wise, diversification is key. Don't put all your money into one player or one year. The 1990-1995 era you're focusing on has some hidden gems that are still undervalued."
+        ]
+        
+        return (
+            content: responses.randomElement() ?? responses[0],
+            type: .marketAlert,
+            attachments: []
+        )
+    }
+    
+    private func generateAuthenticationResponse(message: String) -> (content: String, type: Message.MessageType, attachments: [Message.MessageAttachment]) {
+        let responses = [
+            "Authentication is crucial in today's market! Key things to look for: print quality (should be sharp and clear), paper stock (vintage cards have a specific feel), and centering. When in doubt, professional authentication services like PSA or BGS are worth the investment.",
+            "Great question about authenticity! Red flags include: colors that look too vibrant, glossy finish on cards that should be matte, and modern printing artifacts. The card's 'DNA' - its unique fiber pattern and printing characteristics - is like a fingerprint.",
+            "I always recommend being cautious with high-value purchases. Check the seller's reputation, ask for detailed photos, and don't hesitate to request additional authentication if something feels off. Trust your instincts!"
+        ]
+        
+        return (
+            content: responses.randomElement() ?? responses[0],
+            type: .insight,
+            attachments: []
+        )
+    }
+    
+    private func generateGradingResponse(message: String) -> (content: String, type: Message.MessageType, attachments: [Message.MessageAttachment]) {
+        let responses = [
+            "Grading can significantly increase a card's value, but it's not always worth it. Generally, only grade cards you believe could achieve a 9 or 10. The cost of grading ($20-50+ per card) needs to be justified by the potential value increase.",
+            "PSA and BGS are the most respected grading companies. PSA tends to be more lenient with centering, while BGS provides sub-grades that give you detailed feedback on corners, edges, centering, and surface quality.",
+            "Before sending cards for grading, examine them carefully under good lighting. Look for any surface scratches, corner wear, or edge issues. A card that looks mint to the naked eye might only grade as an 8 due to minor flaws."
+        ]
+        
+        return (
+            content: responses.randomElement() ?? responses[0],
+            type: .action,
+            attachments: []
+        )
+    }
+    
+    private func generateCollectionStrategyResponse(message: String) -> (content: String, type: Message.MessageType, attachments: [Message.MessageAttachment]) {
+        let responses = [
+            "Based on your focus on 1990-1995 cards, I'd suggest building around key rookie cards from that era: Frank Thomas, Ken Griffey Jr., Chipper Jones, and Derek Jeter. These players have lasting appeal and strong market performance.",
+            "A good collection strategy balances your personal interests with investment potential. Since you're focusing on the early '90s, consider both flagship sets (like Topps base) and premium products (like Stadium Club or Finest) from those years.",
+            "Don't overlook condition when building your collection. A PSA 9 common card can sometimes be a better investment than a PSA 6 star player card. Quality over quantity is often the winning approach."
+        ]
+        
+        return (
+            content: responses.randomElement() ?? responses[0],
+            type: .cardRecommendation,
+            attachments: []
+        )
+    }
+    
+    private func generateGeneralResponse(message: String) -> (content: String, type: Message.MessageType, attachments: [Message.MessageAttachment]) {
+        let greetings = ["Hi there!", "Hello!", "Hey!", "Good to see you!"]
+        let responses = [
+            "\(greetings.randomElement() ?? "Hi!") I'm Casey, your AI collecting assistant. I'm here to help you with anything related to your baseball card collection - from valuations to market insights to collection strategy. What can I help you with today?",
+            "Welcome back! I've been analyzing your collection and I have some interesting insights to share. Is there anything specific you'd like to know about your cards or the market in general?",
+            "Great to chat with you! I love talking about baseball cards. Whether you want to discuss market trends, get advice on specific cards, or strategize about your collection goals, I'm here to help. What's on your mind?"
+        ]
+        
+        return (
+            content: responses.randomElement() ?? responses[0],
+            type: .text,
+            attachments: []
+        )
+    }
+    
+    private func addMessage(_ message: Message, to conversationId: UUID) {
+        if let index = conversations.firstIndex(where: { $0.id == conversationId }) {
+            conversations[index].messages.append(message)
+            conversations[index].lastMessageAt = message.timestamp
+            
+            if conversations[index].id == currentConversation?.id {
+                currentConversation = conversations[index]
+            }
+        }
+    }
+    
+    private func learnFromInteraction(userMessage: String, context: Conversation) async {
+        // Analyze user message for preferences and patterns
+        let lowercaseMessage = userMessage.lowercased()
+        
+        // Learn about player preferences
+        let playerNames = ["griffey", "thomas", "jeter", "chipper", "piazza", "bagwell", "rodriguez"]
+        for player in playerNames {
+            if lowercaseMessage.contains(player) {
+                if !userProfile.preferences.favoritePlayers.contains(player.capitalized) {
+                    userProfile.preferences.favoritePlayers.append(player.capitalized)
+                    
+                    let insight = LearningInsight(
+                        category: .userPreference,
+                        title: "Player Interest Detected",
+                        description: "User shows interest in \(player.capitalized)",
+                        confidence: 0.7,
+                        learnedAt: Date(),
+                        applicableScenarios: ["Card recommendations", "Market alerts"]
+                    )
+                    learningInsights.append(insight)
+                }
+            }
+        }
+        
+        // Learn about budget preferences
+        if lowercaseMessage.contains("expensive") || lowercaseMessage.contains("cheap") || lowercaseMessage.contains("budget") {
+            let insight = LearningInsight(
+                category: .behaviorTrend,
+                title: "Budget Consciousness",
+                description: "User is price-sensitive in their collecting approach",
+                confidence: 0.6,
+                learnedAt: Date(),
+                applicableScenarios: ["Price recommendations", "Value suggestions"]
+            )
+            learningInsights.append(insight)
+        }
+        
+        // Update behavior patterns
+        userProfile.behavior.frequentActions.append(userMessage)
+        if userProfile.behavior.frequentActions.count > 50 {
+            userProfile.behavior.frequentActions.removeFirst()
+        }
+    }
+    
+    func startNewConversation(topic: Conversation.ConversationTopic) {
+        let conversation = Conversation(
+            messages: [],
+            startedAt: Date(),
+            lastMessageAt: Date(),
+            topic: topic
+        )
+        
+        conversations.append(conversation)
+        currentConversation = conversation
+        
+        // Add welcome message
+        let welcomeMessage = Message(
+            content: getWelcomeMessage(for: topic),
+            sender: .assistant,
+            timestamp: Date(),
+            type: .text,
+            attachments: []
+        )
+        
+        addMessage(welcomeMessage, to: conversation.id)
+    }
+    
+    private func getWelcomeMessage(for topic: Conversation.ConversationTopic) -> String {
+        switch topic {
+        case .general:
+            return "Hi! I'm Casey, your AI collecting assistant. I'm here to help you make the most of your baseball card collection. What would you like to talk about?"
+        case .cardValuation:
+            return "Let's talk about card values! I can help you understand what drives prices and how to evaluate your cards. What specific cards are you curious about?"
+        case .marketAdvice:
+            return "Ready to dive into market analysis? I can share insights about trends, timing, and investment strategies for your collection focus area. What's your question?"
+        case .collectionStrategy:
+            return "Great choice! Collection strategy is key to building a valuable and enjoyable collection. Let's discuss your goals and how to achieve them efficiently."
+        case .authentication:
+            return "Authentication is crucial in today's market. I can help you spot red flags and understand what to look for when evaluating card authenticity. What concerns do you have?"
+        case .grading:
+            return "Grading can be a game-changer for your collection's value. Let's talk about when it makes sense to grade, which service to use, and what to expect."
+        }
+    }
+    
+    private func setupInitialSuggestions() {
+        suggestions = [
+            Suggestion(
+                title: "Consider Grading High-Value Cards",
+                description: "You have several cards that could benefit from professional grading",
+                category: .grading,
+                priority: .high,
+                actionable: true,
+                relatedCards: [],
+                estimatedImpact: "20-40% value increase"
+            ),
+            
+            Suggestion(
+                title: "Diversify Your Collection",
+                description: "Consider adding cards from different brands and years",
+                category: .buying,
+                priority: .medium,
+                actionable: true,
+                relatedCards: [],
+                estimatedImpact: "Reduced risk, stable growth"
+            ),
+            
+            Suggestion(
+                title: "Organize by Set Completion",
+                description: "Focus on completing specific sets for maximum value",
+                category: .organizing,
+                priority: .medium,
+                actionable: true,
+                relatedCards: [],
+                estimatedImpact: "Set premium bonus"
+            ),
+            
+            Suggestion(
+                title: "Learn About Market Trends",
+                description: "Understanding market cycles can improve your timing",
+                category: .learning,
+                priority: .low,
+                actionable: false,
+                relatedCards: [],
+                estimatedImpact: "Better buy/sell decisions"
+            )
+        ]
+    }
+    
+    func generatePersonalizedSuggestions(for cards: [BaseballCardModel]) {
+        // Analyze collection and generate personalized suggestions
+        var newSuggestions: [Suggestion] = []
+        
+        // Check for grading opportunities
+        let ungradedValuableCards = cards.filter {
+            $0.gradeCompany == .raw &&
+            ($0.estimatedValue ?? 0) > 100 &&
+            ($0.conditionEstimate == .mint || $0.conditionEstimate == .nearMint)
+        }
+        
+        if !ungradedValuableCards.isEmpty {
+            newSuggestions.append(Suggestion(
+                title: "Grade Your Best Cards",
+                description: "I found \(ungradedValuableCards.count) high-value cards in excellent condition that could benefit from grading",
+                category: .grading,
+                priority: .high,
+                actionable: true,
+                relatedCards: Array(ungradedValuableCards.prefix(3)),
+                estimatedImpact: "Potential 25-50% value increase"
+            ))
+        }
+        
+        // Check for collection gaps
+        let playerCounts = Dictionary(grouping: cards, by: \.playerName)
+        let topPlayers = playerCounts.sorted(by: { $0.value.count > $1.value.count }).prefix(3)
+        
+        for (player, playerCards) in topPlayers {
+            let years = Set(playerCards.map(\.cardYear))
+            let missingYears = Set(1990...1995).subtracting(years)
+            
+            if !missingYears.isEmpty {
+                newSuggestions.append(Suggestion(
+                    title: "Complete \(player) Collection",
+                    description: "You're missing \(player) cards from \(missingYears.sorted().map(String.init).joined(separator: ", "))",
+                    category: .buying,
+                    priority: .medium,
+                    actionable: true,
+                    relatedCards: playerCards,
+                    estimatedImpact: "Collection completeness bonus"
+                ))
+            }
+        }
+        
+        suggestions = newSuggestions + suggestions.filter { suggestion in
+            !newSuggestions.contains { $0.title == suggestion.title }
+        }
+    }
+}
+
+
+
+@MainActor
+class AICardScanner: ObservableObject {
+    @Published var isScanning = false
+    @Published var scanResults: [ScannedCard] = []
+    @Published var confidence: Double = 0.0
+
+    struct ScannedCard {
+        let playerName: String
+        let year: Int
+        let brand: String
+        let setName: String
+        let cardNumber: String
+        let confidence: Double
+        let aiGradeEstimate: String
+        let estimatedValue: Decimal
+        let parallel: String?
+        let rookie: Bool
+    }
+
+    // Simulate AI card recognition (like Ludex/CollX)
+    #if canImport(UIKit)
+    func scanCard(image: UIImage) async -> ScannedCard? {
+        isScanning = true
+        
+        // Simulate AI processing delay
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+
+        // Mock AI recognition results
+        let mockResults: [ScannedCard] = [
+            ScannedCard(
+                playerName: "Mike Trout",
+                year: 2023,
+                brand: "Topps",
+                setName: "Chrome",
+                cardNumber: "1",
+                confidence: 0.95,
+                aiGradeEstimate: "PSA 9",
+                estimatedValue: Decimal(string: "125.00")!,
+                parallel: "Base",
+                rookie: false
+            ),
+            ScannedCard(
+                playerName: "Shohei Ohtani",
+                year: 2024,
+                brand: "Panini",
+                setName: "Prizm",
+                cardNumber: "50",
+                confidence: 0.92,
+                aiGradeEstimate: "BGS 9.5",
+                estimatedValue: Decimal(string: "85.00")!,
+                parallel: "Silver Prizm",
+                rookie: false
+            ),
+            ScannedCard(
+                playerName: "Bobby Witt Jr.",
+                year: 2022,
+                brand: "Bowman",
+                setName: "Chrome",
+                cardNumber: "BWJ-1",
+                confidence: 0.88,
+                aiGradeEstimate: "PSA 8.5",
+                estimatedValue: Decimal(string: "45.00")!,
+                parallel: "Refractor",
+                rookie: true
+            )
+        ]
+
+        let result = mockResults.randomElement()!
+        confidence = result.confidence
+        isScanning = false
+
+        return result
+    }
+    #else
+    func scanCard(image: NSImage) async -> ScannedCard? {
+        isScanning = true
+        
+        // Simulate AI processing delay
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+
+        // Mock AI recognition results
+        let mockResults: [ScannedCard] = [
+            ScannedCard(
+                playerName: "Mike Trout",
+                year: 2023,
+                brand: "Topps",
+                setName: "Chrome",
+                cardNumber: "1",
+                confidence: 0.95,
+                aiGradeEstimate: "PSA 9",
+                estimatedValue: Decimal(string: "125.00")!,
+                parallel: "Base",
+                rookie: false
+            ),
+            ScannedCard(
+                playerName: "Shohei Ohtani",
+                year: 2024,
+                brand: "Panini",
+                setName: "Prizm",
+                cardNumber: "50",
+                confidence: 0.92,
+                aiGradeEstimate: "BGS 9.5",
+                estimatedValue: Decimal(string: "85.00")!,
+                parallel: "Silver Prizm",
+                rookie: false
+            ),
+            ScannedCard(
+                playerName: "Bobby Witt Jr.",
+                year: 2022,
+                brand: "Bowman",
+                setName: "Chrome",
+                cardNumber: "BWJ-1",
+                confidence: 0.88,
+                aiGradeEstimate: "PSA 8.5",
+                estimatedValue: Decimal(string: "45.00")!,
+                parallel: "Refractor",
+                rookie: true
+            )
+        ]
+
+        let result = mockResults.randomElement()!
+        confidence = result.confidence
+        isScanning = false
+
+        return result
+    }
+    #endif
+
+    struct AIGradeAnalysis {
+        let overallGrade: String
+        let centering: Double
+        let corners: Double
+        let edges: Double
+        let surface: Double
+        let confidence: Double
+        let recommendation: String
+    }
+
+    // AI Grading Analysis (like CardGrader.AI)
+    #if canImport(UIKit)
+    func analyzeCondition(image: UIImage) async -> AIGradeAnalysis {
+        // Simulate AI grading analysis
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+
+        return AIGradeAnalysis(
+            overallGrade: "8.5",
+            centering: 8.5,
+            corners: 8.0,
+            edges: 9.0,
+            surface: 8.5,
+            confidence: 0.87,
+            recommendation: "Consider PSA grading - likely 8 or 9"
+        )
+    }
+    #else
+    func analyzeCondition(image: NSImage) async -> AIGradeAnalysis {
+        // Simulate AI grading analysis
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+
+        return AIGradeAnalysis(
+            overallGrade: "8.5",
+            centering: 8.5,
+            corners: 8.0,
+            edges: 9.0,
+            surface: 8.5,
+            confidence: 0.87,
+            recommendation: "Consider PSA grading - likely 8 or 9"
+        )
+    }
+    #endif
+}
+
+// Market Data Service (like Market Movers)
+@MainActor
+class MarketDataService: ObservableObject {
+    @Published var isLoading = false
+
+    func fetchRecentSales(for card: BaseballCardModel) async -> [MarketSale] {
+        isLoading = true
+
+        // Simulate API call to eBay/PWCC/Goldin
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+
+        let mockSales: [MarketSale] = [
+            MarketSale(price: Decimal(string: "125.00")!, date: Date(), platform: "eBay", condition: "PSA 9"),
+            MarketSale(price: Decimal(string: "118.50")!, date: Calendar.current.date(byAdding: .day, value: -3, to: Date())!, platform: "PWCC", condition: "PSA 9"),
+            MarketSale(price: Decimal(string: "132.00")!, date: Calendar.current.date(byAdding: .day, value: -7, to: Date())!, platform: "eBay", condition: "PSA 9"),
+            MarketSale(price: Decimal(string: "95.00")!, date: Calendar.current.date(byAdding: .day, value: -14, to: Date())!, platform: "eBay", condition: "PSA 8")
+        ]
+
+        isLoading = false
+        return mockSales
+    }
+
+    func getMarketTrend(sales: [MarketSale]) -> String {
+        guard sales.count >= 2 else { return "Stable" }
+
+        let recent = Array(sales.prefix(3).map { $0.price })
+        let older = Array(sales.suffix(3).map { $0.price })
+
+        let recentAvg = recent.reduce(0, +) / Decimal(recent.count)
+        let olderAvg = older.reduce(0, +) / Decimal(older.count)
+
+        guard olderAvg != 0 else { return "Stable" }
+        let change = (recentAvg - olderAvg) / olderAvg * 100
+
+        if change > 5 { return "Rising" }
+        else if change < -5 { return "Falling" }
+        else { return "Stable" }
+    }
+
+    struct MarketSale {
+        let price: Decimal
+        let date: Date
+        let platform: String
+        let condition: String
+    }
+}
+
+// Marketplace Integration (like CollX List-It feature)
+@MainActor
+class MarketplaceService: ObservableObject {
+    @Published var isListing = false
+
+    func createListing(for card: BaseballCardModel, price: Decimal, platform: String) async -> ListingResult {
+        isListing = true
+
+        // Simulate listing creation
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+
+        let listingURL = "https://\(platform.lowercased()).com/listing/\(UUID().uuidString)"
+
+        isListing = false
+
+        return ListingResult(
+            success: true,
+            listingURL: listingURL,
+            listingID: UUID().uuidString,
+            platform: platform,
+            message: "Successfully listed on \(platform)"
+        )
+    }
+
+    struct ListingResult {
+        let success: Bool
+        let listingURL: String
+        let listingID: String
+        let platform: String
+        let message: String
+    }
+}
+
+// Portfolio Analytics (investment tracking)
+struct PortfolioAnalytics {
+    static func calculatePerformance(for cards: [BaseballCardModel]) -> PortfolioSummary {
+        let totalAcquisitionCost = cards.compactMap { $0.acquisitionCost }.reduce(0, +)
+        let totalCurrentValue = cards.compactMap { $0.currentMarketValue }.reduce(0, +)
+        let totalGainLoss = totalCurrentValue - totalAcquisitionCost
+        let performancePercent = totalAcquisitionCost > 0 ? Double(truncating: (totalGainLoss / totalAcquisitionCost * 100) as NSNumber) : 0.0
+
+        let topPerformers = cards
+            .filter { (card: BaseballCardModel) -> Bool in
+                (card.performancePercent ?? 0) > 0
+            }
+            .sorted(by: { (a, b) in
+                (a.performancePercent ?? 0) > (b.performancePercent ?? 0)
+            })
+            .prefix(5)
+
+        let biggestLosers = cards
+            .filter { (card: BaseballCardModel) -> Bool in
+                (card.performancePercent ?? 0) < 0
+            }
+            .sorted(by: { (a, b) in
+                (a.performancePercent ?? 0) < (b.performancePercent ?? 0)
+            })
+            .prefix(5)
+
+        return PortfolioSummary(
+            totalCards: cards.count,
+            totalAcquisitionCost: totalAcquisitionCost,
+            totalCurrentValue: totalCurrentValue,
+            totalGainLoss: totalGainLoss,
+            performancePercent: performancePercent,
+            topPerformers: Array(topPerformers),
+            biggestLosers: Array(biggestLosers)
+        )
+    }
+
+    struct PortfolioSummary {
+        let totalCards: Int
+        let totalAcquisitionCost: Decimal
+        let totalCurrentValue: Decimal
+        let totalGainLoss: Decimal
+        let performancePercent: Double
+        let topPerformers: [BaseballCardModel]
+        let biggestLosers: [BaseballCardModel]
+    }
+}
+
+// MARK: - SwiftUI Views
+
+struct AIAssistantView: View {
+    @StateObject private var assistant = AIAssistant()
+    @State private var messageText = ""
+    @State private var showSuggestions = false
+    
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 0) {
+                // Chat Messages
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 12) {
+                            if let conversation = assistant.currentConversation {
+                                ForEach(conversation.messages, id: \.id) { message in
+                                    MessageBubble(message: message)
+                                        .id(message.id)
+                                }
+                            }
+                            
+                            if assistant.isTyping {
+                                TypingIndicator()
+                            }
+                        }
+                        .padding()
+                    }
+                    .onChange(of: assistant.currentConversation?.messages.count) { _ in
+                        if let lastMessage = assistant.currentConversation?.messages.last {
+                            withAnimation {
+                                proxy.scrollTo(lastMessage.id, anchor: .bottom)
+                            }
+                        }
+                    }
+                }
+                
+                Divider()
+                
+                // Message Input
+                HStack(spacing: 12) {
+                    Button(action: { showSuggestions.toggle() }) {
+                        Image(systemName: "lightbulb.fill")
+                            .foregroundColor(.blue)
+                    }
+                    
+                    TextField("Ask Casey anything about your collection...", text: $messageText, axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
+                        .lineLimit(1...4)
+                    
+                    Button(action: sendMessage) {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.title2)
+                            .foregroundColor(messageText.isEmpty ? .gray : .blue)
+                    }
+                    .disabled(messageText.isEmpty || assistant.isTyping)
+                }
+                .padding()
+            }
+            .navigationTitle("AI Assistant")
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Menu("New Chat") {
+                        Button("General Chat") {
+                            assistant.startNewConversation(topic: .general)
+                        }
+                        Button("Card Valuation") {
+                            assistant.startNewConversation(topic: .cardValuation)
+                        }
+                        Button("Market Advice") {
+                            assistant.startNewConversation(topic: .marketAdvice)
+                        }
+                        Button("Collection Strategy") {
+                            assistant.startNewConversation(topic: .collectionStrategy)
+                        }
+                        Button("Authentication Help") {
+                            assistant.startNewConversation(topic: .authentication)
+                        }
+                        Button("Grading Advice") {
+                            assistant.startNewConversation(topic: .grading)
+                        }
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $showSuggestions) {
+            SuggestionsView(assistant: assistant)
+        }
+    }
+    
+    private func sendMessage() {
+        guard !messageText.isEmpty else { return }
+        
+        Task {
+            await assistant.sendMessage(messageText)
+        }
+        
+        messageText = ""
+    }
+}
+
+struct MessageBubble: View {
+    let message: AIAssistant.Message
+    
+    var body: some View {
+        GeometryReader { geo in
+            HStack {
+                if message.sender == .user {
+                    Spacer()
+                }
+                
+                VStack(alignment: message.sender == .user ? .trailing : .leading, spacing: 4) {
+                    Text(message.content)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                        .background(message.sender == .user ? Color.blue : Color.gray.opacity(0.15))
+                        .foregroundColor(message.sender == .user ? .white : .primary)
+                        .cornerRadius(18)
+                    
+                    Text(message.timestamp.formatted(.dateTime.hour().minute()))
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: min(geo.size.width * 0.75, 480), alignment: message.sender == .user ? .trailing : .leading)
+                
+                if message.sender == .assistant {
+                    Spacer()
+                }
+            }
+        }
+        .frame(height: nil)
+    }
+}
+
+struct TypingIndicator: View {
+    @State private var animationPhase = 0
+    
+    var body: some View {
+        HStack {
+            HStack(spacing: 4) {
+                ForEach(0..<3) { index in
+                    Circle()
+                        .fill(Color.gray)
+                        .frame(width: 8, height: 8)
+                        .scaleEffect(animationPhase == index ? 1.2 : 0.8)
+                        .animation(.easeInOut(duration: 0.6).repeatForever().delay(Double(index) * 0.2), value: animationPhase)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(Color.gray.opacity(0.15))
+            .cornerRadius(18)
+            
+            Spacer()
+        }
+        .onAppear {
+            animationPhase = 0
+            Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { _ in
+                animationPhase = (animationPhase + 1) % 3
+            }
+        }
+    }
+}
+
+struct SuggestionsView: View {
+    @ObservedObject var assistant: AIAssistant
+    @Environment(\.dismiss) private var dismiss
+    
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                LazyVStack(spacing: 12) {
+                    ForEach(assistant.suggestions, id: \.id) { suggestion in
+                        SuggestionCard(suggestion: suggestion)
+                    }
+                }
+                .padding()
+            }
+            .navigationTitle("AI Suggestions")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct SuggestionCard: View {
+    let suggestion: AIAssistant.Suggestion
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: suggestion.category.icon)
+                    .foregroundColor(suggestion.category.color)
+                    .font(.title2)
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(suggestion.title)
+                        .font(.headline)
+                        .fontWeight(.medium)
+                    
+                    Text(suggestion.category.displayName)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
+                
+                Circle()
+                    .fill(suggestion.priority.color)
+                    .frame(width: 12, height: 12)
+            }
+            
+            Text(suggestion.description)
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+            
+            if !suggestion.estimatedImpact.isEmpty {
+                Text("Impact: \(suggestion.estimatedImpact)")
+                    .font(.caption)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(suggestion.category.color.opacity(0.1))
+                    .foregroundColor(suggestion.category.color)
+                    .cornerRadius(6)
+            }
+            
+            if !suggestion.relatedCards.isEmpty {
+                Text("\(suggestion.relatedCards.count) related cards")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding()
+        .background(Color.gray.opacity(0.08))
+        .cornerRadius(12)
+    }
+}
+
+// Comprehensive AI Assistant Interface
+struct AIAssistantInterface: View {
+    @Query private var cards: [BaseballCardModel]
+    @StateObject private var aiAssistant = EnhancedAIAssistant()
+    @State private var queryText = ""
+    @State private var selectedCapability: AICapabilityCategory = .core
+    @State private var showVoiceInput = false
+    
+    var body: some View {
+        NavigationSplitView {
+            // Capability Categories Sidebar
+            List(AICapabilityCategory.allCases, id: \.self, selection: $selectedCapability) { category in
+                Label(category.displayName, systemImage: category.icon)
+                    .badge(category.capabilityCount)
+            }
+            .navigationTitle("AI Assistant")
+        } detail: {
+            VStack {
+                // AI Status Header
+                aiStatusHeader
+                
+                // Query Input
+                queryInputSection
+                
+                // Capability-Specific Interface
+                capabilityInterface
+                
+                // Recent Responses
+                responseHistory
+            }
+            .padding()
+        }
+    }
+    
+    private var aiStatusHeader: some View {
+        HStack {
+            Image(systemName: "brain")
+                .font(.title2)
+                .foregroundColor(.blue)
+            
+            VStack(alignment: .leading) {
+                Text("AI Assistant Active")
+                    .font(.headline)
+                Text("\(selectedCapability.displayName) • \(cards.count) cards analyzed")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            Spacer()
+            
+            if aiAssistant.isProcessing {
+                ProgressView()
+                    .scaleEffect(0.8)
+            }
+        }
+        .padding()
+        .background(Color.blue.opacity(0.1))
+        .cornerRadius(12)
+    }
+    
+    private var queryInputSection: some View {
+        HStack {
+            TextField("Ask me anything about your collection...", text: $queryText)
+                .textFieldStyle(RoundedBorderTextFieldStyle())
+            
+            Button(action: { showVoiceInput.toggle() }) {
+                Image(systemName: "mic.fill")
+                    .foregroundColor(showVoiceInput ? .red : .blue)
+            }
+            .buttonStyle(.bordered)
+            
+            Button("Ask") {
+                processQuery()
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(queryText.isEmpty || aiAssistant.isProcessing)
+        }
+    }
+    
+    @ViewBuilder
+    private var capabilityInterface: some View {
+        ScrollView {
+            LazyVStack(spacing: 16) {
+                switch selectedCapability {
+                case .core:
+                    coreCapabilitiesView
+                case .inventory:
+                    inventoryCapabilitiesView
+                case .marketplace:
+                    marketplaceCapabilitiesView
+                case .community:
+                    communityCapabilitiesView
+                }
+            }
+        }
+    }
+    
+    private var coreCapabilitiesView: some View {
+        VStack(spacing: 12) {
+            // Quick Actions
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 2), spacing: 12) {
+                AIQuickAction(
+                    title: "Generate Summary",
+                    icon: "doc.text",
+                    action: { generateSummary() }
+                )
+                
+                AIQuickAction(
+                    title: "Forecast Trends",
+                    icon: "chart.line.uptrend.xyaxis",
+                    action: { forecastTrends() }
+                )
+                
+                AIQuickAction(
+                    title: "Actionable Insights",
+                    icon: "lightbulb",
+                    action: { generateInsights() }
+                )
+                
+                AIQuickAction(
+                    title: "Voice Command",
+                    icon: "mic",
+                    action: { showVoiceInput.toggle() }
+                )
+            }
+            
+            // Recent Analysis
+            if let topCard = cards.max(by: { (a, b) in (a.currentMarketValue ?? 0) < (b.currentMarketValue ?? 0) }) {
+                AIAnalysisCard(
+                    title: "Top Value Card Analysis",
+                    content: "Your \(topCard.playerName) (\(topCard.cardYear)) is valued at $\(NSDecimalNumber(decimal: topCard.currentMarketValue ?? 0).doubleValue)",
+                    action: "Analyze Trends"
+                )
+            }
+        }
+    }
+    
+    private var inventoryCapabilitiesView: some View {
+        VStack(spacing: 12) {
+            // Inventory AI Tools
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 2), spacing: 12) {
+                AIQuickAction(
+                    title: "Grade Prediction",
+                    icon: "checkmark.seal",
+                    action: { predictGrades() }
+                )
+                
+                AIQuickAction(
+                    title: "Flaw Detection",
+                    icon: "magnifyingglass",
+                    action: { detectFlaws() }
+                )
+                
+                AIQuickAction(
+                    title: "Storage Optimizer",
+                    icon: "archivebox",
+                    action: { optimizeStorage() }
+                )
+                
+                AIQuickAction(
+                    title: "Duplicate Finder",
+                    icon: "doc.on.doc",
+                    action: { findDuplicates() }
+                )
+            }
+            
+            // Grading Recommendations
+            let ungradedCards = cards.filter { $0.gradeCompany == .raw && ($0.estimatedValue ?? 0) > 100 }
+            if !ungradedCards.isEmpty {
+                AIAnalysisCard(
+                    title: "Grading Opportunities",
+                    content: "\(ungradedCards.count) cards recommended for professional grading",
+                    action: "View Details"
+                )
+            }
+        }
+    }
+    
+    private var marketplaceCapabilitiesView: some View {
+        VStack(spacing: 12) {
+            // Marketplace AI Tools
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 2), spacing: 12) {
+                AIQuickAction(
+                    title: "Price Optimizer",
+                    icon: "dollarsign.circle",
+                    action: { optimizePricing() }
+                )
+                
+                AIQuickAction(
+                    title: "Arbitrage Finder",
+                    icon: "arrow.triangle.2.circlepath",
+                    action: { findArbitrage() }
+                )
+                
+                AIQuickAction(
+                    title: "ROI Analysis",
+                    icon: "chart.bar",
+                    action: { analyzeROI() }
+                )
+                
+                AIQuickAction(
+                    title: "Risk Assessment",
+                    icon: "shield",
+                    action: { assessRisk() }
+                )
+            }
+            
+            // Market Alerts
+            let risingCards = cards.filter { $0.marketTrend == "Rising" }
+            if !risingCards.isEmpty {
+                AIAnalysisCard(
+                    title: "Market Opportunities",
+                    content: "\(risingCards.count) cards showing upward trends",
+                    action: "View Trends"
+                )
+            }
+        }
+    }
+    
+    private var communityCapabilitiesView: some View {
+        VStack(spacing: 12) {
+            // Community AI Tools
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 2), spacing: 12) {
+                AIQuickAction(
+                    title: "Achievement Guide",
+                    icon: "trophy",
+                    action: { suggestAchievements() }
+                )
+                
+                AIQuickAction(
+                    title: "Trade Matcher",
+                    icon: "arrow.left.arrow.right",
+                    action: { findTrades() }
+                )
+                
+                AIQuickAction(
+                    title: "Social Content",
+                    icon: "camera",
+                    action: { generateContent() }
+                )
+                
+                AIQuickAction(
+                    title: "Learning Path",
+                    icon: "graduationcap",
+                    action: { recommendLearning() }
+                )
+            }
+            
+            // Community Insights
+            AIAnalysisCard(
+                title: "Community Activity",
+                content: "3 local events found, 5 trade matches available",
+                action: "Explore Community"
+            )
+        }
+    }
+    
+    private var responseHistory: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Recent AI Responses")
+                .font(.headline)
+            
+            ForEach(aiAssistant.responses.suffix(3)) { response in
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(response.capability.rawValue)
+                            .font(.caption)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.blue.opacity(0.2))
+                            .cornerRadius(4)
+                        
+                        Spacer()
+                        
+                        Text(response.timestamp, style: .time)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Text("Q: \(response.query)")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                    
+                    Text("A: \(response.response)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding()
+                .background(Color.gray.opacity(0.1))
+                .cornerRadius(8)
+            }
+        }
+    }
+    
+    // Action Methods
+    private func processQuery() {
+        Task {
+            let response = await aiAssistant.contextualQuery(queryText, cards: cards)
+            aiAssistant.responses.append(AIResponse(
+                query: queryText,
+                response: response,
+                timestamp: Date(),
+                capability: selectedCapability.primaryCapability
+            ))
+            queryText = ""
+        }
+    }
+    
+    private func generateSummary() {
+        queryText = "Generate a summary of my collection performance"
+        processQuery()
+    }
+    
+    private func forecastTrends() {
+        queryText = "What are the trend forecasts for my top 5 cards?"
+        processQuery()
+    }
+    
+    private func generateInsights() {
+        let insights = aiAssistant.generateActionableInsights(cards: cards)
+        aiAssistant.responses.append(AIResponse(
+            query: "Generate actionable insights",
+            response: insights,
+            timestamp: Date(),
+            capability: .actionableInsights
+        ))
+    }
+    
+    private func predictGrades() {
+        queryText = "Which of my raw cards should I consider grading?"
+        processQuery()
+    }
+    
+    private func detectFlaws() {
+        queryText = "Analyze my cards for potential condition issues"
+        processQuery()
+    }
+    
+    private func optimizeStorage() {
+        queryText = "How can I optimize my card storage?"
+        processQuery()
+    }
+    
+    private func findDuplicates() {
+        queryText = "Find duplicate cards in my collection"
+        processQuery()
+    }
+    
+    private func optimizePricing() {
+        queryText = "Optimize pricing for my listed cards"
+        processQuery()
+    }
+    
+    private func findArbitrage() {
+        queryText = "Find arbitrage opportunities in the market"
+        processQuery()
+    }
+    
+    private func analyzeROI() {
+        queryText = "Show me my best ROI performers"
+        processQuery()
+    }
+    
+    private func assessRisk() {
+        queryText = "Assess the risk profile of my portfolio"
+        processQuery()
+    }
+    
+    private func suggestAchievements() {
+        queryText = "What achievements should I focus on next?"
+        processQuery()
+    }
+    
+    private func findTrades() {
+        queryText = "Find potential trade partners in my area"
+        processQuery()
+    }
+    
+    private func generateContent() {
+        queryText = "Generate social media content for my best cards"
+        processQuery()
+    }
+    
+    private func recommendLearning() {
+        queryText = "Recommend learning content for my skill level"
+        processQuery()
+    }
+}
+
+// Supporting Views
+struct AIQuickAction: View {
+    let title: String
+    let icon: String
+    let action: () -> Void
+    
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.title2)
+                    .foregroundColor(.blue)
+                
+                Text(title)
+                    .font(.caption)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity)
+            .padding()
+            .background(Color.blue.opacity(0.1))
+            .cornerRadius(12)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct AIAnalysisCard: View {
+    let title: String
+    let content: String
+    let action: String
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.subheadline)
+                .fontWeight(.medium)
+            
+            Text(content)
+                .font(.caption)
+                .foregroundColor(.secondary)
+            
+            HStack {
+                Spacer()
+                Button(action) {
+                    // Action implementation
+                }
+                .font(.caption)
+                .buttonStyle(.bordered)
+            }
+        }
+        .padding()
+        .background(Color.gray.opacity(0.1))
+        .cornerRadius(12)
+    }
+}
+
+// AI Capability Categories
+enum AICapabilityCategory: String, CaseIterable {
+    case core = "Core"
+    case inventory = "Inventory"
+    case marketplace = "Marketplace"
+    case community = "Community"
+    
+    var displayName: String {
+        switch self {
+        case .core: return "Core AI"
+        case .inventory: return "Inventory AI"
+        case .marketplace: return "Marketplace AI"
+        case .community: return "Community AI"
+        }
+    }
+    
+    var icon: String {
+        switch self {
+        case .core: return "brain"
+        case .inventory: return "archivebox"
+        case .marketplace: return "cart"
+        case .community: return "person.3"
+        }
+    }
+    
+    var capabilityCount: Int {
+        switch self {
+        case .core: return 15
+        case .inventory: return 30
+        case .marketplace: return 30
+        case .community: return 25
+        }
+    }
+    
+    var primaryCapability: AICapability {
+        switch self {
+        case .core: return .contextualQA
+        case .inventory: return .contextualQA
+        case .marketplace: return .contextualQA
+        case .community: return .contextualQA
+        }
+    }
+}
+
+// AI Community, Game Center & Education Capabilities (76-100)
+extension EnhancedAIAssistant {
+    
+    // 77. Local Trade Matcher
+    func findLocalTradeMatches(userWants: [String], userTrades: [String], radius: Double) -> [TradeMatch] {
+        // Simulate local collector matching
+        return [
+            TradeMatch(
+                collector: "CardCollector_SF",
+                distance: 12.5,
+                matchingWants: ["2023 Topps Chrome Ohtani"],
+                matchingTrades: ["2022 Bowman Chrome Witt Jr."],
+                compatibility: 0.85,
+                reputation: 4.8
+            )
+        ]
+    }
+    
+    // 78. Social Content Generator
+    func generateSocialContent(weeklyGain: Decimal, topCard: BaseballCardModel) -> SocialContent {
+        let gainPercent = Double(truncating: (weeklyGain / (topCard.purchasePrice ?? 1) * 100) as NSNumber)
+        
+        return SocialContent(
+            videoScript: String(format: "This week's biggest winner: %@ up %.1f%%! 📈⚾", topCard.playerName, gainPercent),
+            hashtags: ["#BaseballCards", "#Investing", "#\(topCard.playerName.replacingOccurrences(of: " ", with: ""))"],
+            suggestedPlatforms: ["Twitter", "Instagram", "TikTok"],
+            visualElements: ["Card image", "Price chart", "Percentage overlay"]
+        )
+    }
+    
+    // 79. Curated Feed
+    func curateFeed(userInterests: [String], communityPosts: [CommunityPost]) -> [CommunityPost] {
+        return communityPosts
+            .filter { post in
+                userInterests.contains { interest in
+                    post.content.localizedCaseInsensitiveContains(interest) ||
+                    post.tags.contains { $0.localizedCaseInsensitiveContains(interest) }
+                }
+            }
+            .sorted { $0.relevanceScore > $1.relevanceScore }
+    }
+    
+    // 80. Forum Post Summary
+    func summarizeForumThread(posts: [ForumPost]) -> ThreadSummary {
+        let keyPoints = extractKeyPoints(from: posts)
+        let consensus = determineConsensus(from: posts)
+        let sentiment = analyzeSentiment(posts.map { $0.content }.joined(separator: " "))
+        
+        return ThreadSummary(
+            totalPosts: posts.count,
+            keyPoints: keyPoints,
+            consensus: consensus,
+            sentiment: sentiment,
+            summary: "Thread discusses \(keyPoints.first ?? "various topics") with \(sentiment.lowercased()) sentiment"
+        )
+    }
+    
+    // 81. Learning Path
+    func recommendLearningPath(userLevel: CollectorLevel, interests: [String]) -> LearningPath {
+        let content: [LearningContent] = {
+            switch userLevel {
+            case .beginner:
+                return [
+                    LearningContent(title: "Card Grading Basics", type: .article, duration: 10),
+                    LearningContent(title: "Understanding Market Values", type: .video, duration: 15),
+                    LearningContent(title: "Storage and Protection", type: .guide, duration: 8)
+                ]
+            case .intermediate:
+                return [
+                    LearningContent(title: "Advanced Grading Strategies", type: .video, duration: 20),
+                    LearningContent(title: "Market Timing Techniques", type: .article, duration: 12),
+                    LearningContent(title: "Portfolio Diversification", type: .course, duration: 45)
+                ]
+            case .expert:
+                return [
+                    LearningContent(title: "Professional Consignment", type: .masterclass, duration: 60),
+                    LearningContent(title: "Tax Optimization Strategies", type: .webinar, duration: 30),
+                    LearningContent(title: "Advanced Market Analysis", type: .course, duration: 90)
+                ]
+            }
+        }()
+        
+        return LearningPath(level: userLevel, content: content, estimatedCompletion: "2-3 weeks")
+    }
+    
+    // 82. Community Value Check
+    func requestCommunityGrading(card: BaseballCardModel, trustedUsers: [String]) -> CommunityGradingRequest {
+        return CommunityGradingRequest(
+            card: card,
+            requestedUsers: trustedUsers,
+            estimatedResponses: trustedUsers.count,
+            consensusThreshold: 0.7,
+            expirationDate: Calendar.current.date(byAdding: .day, value: 3, to: Date()) ?? Date()
+        )
+    }
+    
+    // 83. Local Event Alert
+    func findRelevantEvents(location: String, interests: [BaseballCardModel]) -> [LocalEvent] {
+        return [
+            LocalEvent(
+                name: "Bay Area Card Show",
+                date: Calendar.current.date(byAdding: .day, value: 14, to: Date()) ?? Date(),
+                location: "San Francisco, CA",
+                distance: 25.3,
+                relevantVendors: ["Vintage Baseball", "Modern Rookies"],
+                targetCards: interests.prefix(3).map { $0.playerName }
+            )
+        ]
+    }
+    
+    // 84. Leaderboard Strategy
+    func analyzeLeaderboardStrategy(currentRank: Int, targetMetric: String) -> LeaderboardStrategy {
+        let strategies: [String: String] = [
+            "Total Cards": "Focus on bulk acquisitions and set completions",
+            "Total Value": "Target high-value vintage and graded cards",
+            "Total Profit": "Emphasize quick flips and market timing"
+        ]
+        
+        return LeaderboardStrategy(
+            currentRank: currentRank,
+            targetMetric: targetMetric,
+            strategy: strategies[targetMetric] ?? "General collecting advice",
+            estimatedTimeToImprove: "2-4 weeks",
+            specificActions: ["Add 50+ cards this month", "Focus on $100+ acquisitions"]
+        )
+    }
+    
+    // 85. Mentorship Match
+    func findMentor(userProfile: CollectorProfile) -> MentorshipMatch? {
+        // Simulate mentor matching algorithm
+        return MentorshipMatch(
+            mentorName: "VintageCardExpert",
+            expertise: ["Vintage Cards", "Grading", "Investment Strategy"],
+            experience: "15 years",
+            compatibility: 0.92,
+            location: "Within 50 miles",
+            availability: "Weekends"
+        )
+    }
+    
+    // 86. Personalized Hobby News
+    func generatePersonalizedNews(userCards: [BaseballCardModel]) -> [NewsItem] {
+        let playerNames = Set(userCards.map { $0.playerName })
+        
+        return [
+            NewsItem(
+                headline: "Mike Trout Signs Extension - Cards Surge 15%",
+                relevance: playerNames.contains("Mike Trout") ? 1.0 : 0.0,
+                impact: CommunityNewsImpact.positive,
+                summary: "Long-term deal boosts card values across all years"
+            ),
+            NewsItem(
+                headline: "Rookie Class 2024 Performance Update",
+                relevance: userCards.contains { $0.rookie && $0.cardYear == 2024 } ? 0.8 : 0.2,
+                impact: CommunityNewsImpact.neutral,
+                summary: "Mixed results for first-year players"
+            )
+        ]
+    }
+    
+    // 87. Virtual Showcase Builder
+    func createVirtualShowcase(topCards: [BaseballCardModel]) -> VirtualShowcase {
+        let showcase = topCards.prefix(5).map { card in
+            ShowcaseItem(
+                card: card,
+                displayOrder: topCards.firstIndex(of: card)! + 1,
+                description: "\(card.cardYear) \(card.brand) \(card.playerName) - \(card.gradeDisplay)",
+                estimatedViews: Int.random(in: 100...1000)
+            )
+        }
+        
+        return VirtualShowcase(
+            items: Array(showcase),
+            theme: "Premium Collection",
+            shareableURL: "https://cardtracker.app/showcase/\(UUID().uuidString)"
+        )
+    }
+    
+    // 88. Card Show Checklist
+    func generateShowChecklist(targetCards: [String], budget: Decimal) -> ShowChecklist {
+        let items = targetCards.map { cardName in
+            ChecklistItem(
+                cardName: cardName,
+                targetGrade: "PSA 9+",
+                maxPrice: budget / Decimal(targetCards.count),
+                priority: .medium,
+                found: false
+            )
+        }
+        
+        return ShowChecklist(
+            eventName: "Upcoming Card Show",
+            items: items,
+            totalBudget: budget,
+            printableVersion: true
+        )
+    }
+    
+    // Helper functions
+    private func extractKeyPoints(from posts: [ForumPost]) -> [String] {
+        // Simulate key point extraction
+        return ["Price trends discussed", "Grading service comparisons", "Market predictions"]
+    }
+    
+    private func determineConsensus(from posts: [ForumPost]) -> String {
+        // Simulate consensus analysis
+        return "General agreement on market stability"
+    }
+    
+    // Public helper as a stand-in for sentiment analysis accessible to this extension
+    func publicAnalyzeSentiment(_ text: String) -> String {
+        // Simple heuristic sentiment placeholder
+        return "Neutral"
+    }
+}
+
+// Data Models for AI Community Features
+struct TradeMatch {
+    let collector: String
+    let distance: Double
+    let matchingWants: [String]
+    let matchingTrades: [String]
+    let compatibility: Double
+    let reputation: Double
+}
+
+struct SocialContent {
+    let videoScript: String
+    let hashtags: [String]
+    let suggestedPlatforms: [String]
+    let visualElements: [String]
+}
+
+struct CommunityPost {
+    let id: UUID
+    let author: String
+    let content: String
+    let tags: [String]
+    let relevanceScore: Double
+    let timestamp: Date
+}
+
+struct ForumPost {
+    let author: String
+    let content: String
+    let timestamp: Date
+    let likes: Int
+}
+
+struct ThreadSummary {
+    let totalPosts: Int
+    let keyPoints: [String]
+    let consensus: String
+    let sentiment: String
+    let summary: String
+}
+
+enum CollectorLevel {
+    case beginner, intermediate, expert
+}
+
+struct LearningContent {
+    let title: String
+    let type: ContentType
+    let duration: Int // minutes
+}
+
+enum ContentType {
+    case article, video, guide, course, masterclass, webinar
+}
+
+struct LearningPath {
+    let level: CollectorLevel
+    let content: [LearningContent]
+    let estimatedCompletion: String
+}
+
+struct CommunityGradingRequest {
+    let card: BaseballCardModel
+    let requestedUsers: [String]
+    let estimatedResponses: Int
+    let consensusThreshold: Double
+    let expirationDate: Date
+}
+
+struct LocalEvent {
+    let name: String
+    let date: Date
+    let location: String
+    let distance: Double
+    let relevantVendors: [String]
+    let targetCards: [String]
+}
+
+struct LeaderboardStrategy {
+    let currentRank: Int
+    let targetMetric: String
+    let strategy: String
+    let estimatedTimeToImprove: String
+    let specificActions: [String]
+}
+
+struct CollectorProfile {
+    let experience: CollectorLevel
+    let interests: [String]
+    let location: String
+    let goals: [String]
+}
+
+struct MentorshipMatch {
+    let mentorName: String
+    let expertise: [String]
+    let experience: String
+    let compatibility: Double
+    let location: String
+    let availability: String
+}
+
+struct NewsItem {
+    let headline: String
+    let relevance: Double
+    let impact: CommunityNewsImpact
+    let summary: String
+}
+
+enum CommunityNewsImpact {
+    case positive, negative, neutral
+    
+    var color: Color {
+        switch self {
+        case .positive: return .green
+        case .negative: return .red
+        case .neutral: return .gray
+        }
+    }
+}
+
+struct ShowcaseItem {
+    let card: BaseballCardModel
+    let displayOrder: Int
+    let description: String
+    let estimatedViews: Int
+}
+
+struct VirtualShowcase {
+    let items: [ShowcaseItem]
+    let theme: String
+    let shareableURL: String
+}
+
+struct ChecklistItem {
+    let cardName: String
+    let targetGrade: String
+    let maxPrice: Decimal
+    let priority: Priority
+    var found: Bool
+}
+
+struct ShowChecklist {
+    let eventName: String
+    let items: [ChecklistItem]
+    let totalBudget: Decimal
+    let printableVersion: Bool
+}
+
+struct AnalyticsDashboard: View {
+    @Query private var cards: [BaseballCardModel]
+    @StateObject private var aiAssistant = AIAssistant()
+    @State private var queryText = ""
+    
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                LazyVStack(spacing: 20) {
+                    // Portfolio Overview
+                    portfolioOverviewSection
+                    
+                    // Risk Analysis
+                    concentrationRiskSection
+                    
+                    // Vintage Premium Analysis
+                    vintagePremiumSection
+                    
+                    // Rookie Focus
+                    rookieFocusSection
+                    
+                    // Optimization Suggestions
+                    optimizationSection
+                    
+                    // AI Assistant
+                    aiAssistantSection
+                }
+                .padding()
+            }
+            .navigationTitle("Portfolio Analytics")
+        }
+    }
+    
+    private var portfolioOverviewSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Portfolio Overview")
+                .font(.headline)
+            
+            let analytics = PortfolioAnalytics.calculatePerformance(for: cards)
+            
+            HStack {
+                VStack(alignment: .leading) {
+                    Text("Total Value")
+                    Text(String(format: "$%.2f", NSDecimalNumber(decimal: analytics.totalCurrentValue).doubleValue))
+                        .font(.title2)
+                        .fontWeight(.bold)
+                }
+                
+                Spacer()
+                
+                VStack(alignment: .trailing) {
+                    Text("Performance")
+                    HStack {
+                        Text(String(format: "%.1f%%", analytics.performancePercent))
+                            .font(.title2)
+                            .fontWeight(.bold)
+                            .foregroundColor(analytics.performancePercent >= 0 ? .green : .red)
+                        Image(systemName: analytics.performancePercent >= 0 ? "arrow.up" : "arrow.down")
+                            .foregroundColor(analytics.performancePercent >= 0 ? .green : .red)
+                    }
+                }
+            }
+            .padding()
+            .background(Color.gray.opacity(0.1))
+            .cornerRadius(8)
+        }
+    }
+    
+    private var concentrationRiskSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Concentration Risk Analysis")
+                .font(.headline)
+            
+            let risk = AdvancedAnalytics.analyzeConcentrationRisk(cards: cards)
+            let riskColor: Color = {
+                switch risk.riskLevel {
+                case .low: return .green
+                case .medium: return .orange
+                case .high: return .red
+                }
+            }()
+            
+            HStack {
+                VStack(alignment: .leading) {
+                    Text("Top Holding: \(risk.topPlayer)")
+                        .font(.subheadline)
+                    Text(String(format: "%.1f%% of portfolio", risk.concentrationPercent))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
+                
+                VStack {
+                    Text(String(describing: risk.riskLevel))
+                        .font(.caption)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(riskColor.opacity(0.2))
+                        .foregroundColor(riskColor)
+                        .cornerRadius(4)
+                }
+            }
+            
+            Text(risk.recommendation)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .padding(.top, 4)
+        }
+        .padding()
+        .background(Color.gray.opacity(0.1))
+        .cornerRadius(8)
+    }
+    
+    private var vintagePremiumSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Vintage Premium Potential")
+                .font(.headline)
+            
+            let premiums = AdvancedAnalytics.analyzeVintagePremium(cards: cards)
+            
+            ForEach(premiums, id: \.era) { premium in
+                
+                HStack {
+                    VStack(alignment: .leading) {
+                        Text(premium.era)
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                        Text("\(premium.premiumCards)/\(premium.totalCards) premium cards")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Spacer()
+                    
+                    VStack(alignment: .trailing) {
+                        Text(String(format: "%.1f%%", premium.premiumPercent))
+                            .font(.subheadline)
+                            .fontWeight(.bold)
+                        Text(String(format: "$%.0f avg", NSDecimalNumber(decimal: premium.avgValue).doubleValue))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                
+                if !premium.opportunity.contains("Standard") {
+                    Text(premium.opportunity)
+                        .font(.caption)
+                        .foregroundColor(.blue)
+                        .padding(.top, 2)
+                }
+            }
+        }
+        .padding()
+        .background(Color.gray.opacity(0.1))
+        .cornerRadius(8)
+    }
+    
+    private var rookieFocusSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Rookie Card Focus")
+                .font(.headline)
+            
+            let rookieFocus = AdvancedAnalytics.analyzeRookieFocus(cards: cards)
+            
+            HStack {
+                VStack(alignment: .leading) {
+                    Text("\(rookieFocus.totalRookies) Rookie Cards")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                    Text(String(format: "$%.0f total value", NSDecimalNumber(decimal: rookieFocus.rookieValue).doubleValue))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
+                
+                VStack(alignment: .trailing) {
+                    Text(String(format: "%.1f%%", rookieFocus.rookieValuePercent))
+                        .font(.title3)
+                        .fontWeight(.bold)
+                    Text("of portfolio")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            
+            Text(rookieFocus.strategy)
+                .font(.caption)
+                .foregroundColor(.blue)
+                .padding(.top, 4)
+        }
+        .padding()
+        .background(Color.gray.opacity(0.1))
+        .cornerRadius(8)
+    }
+    
+    private var optimizationSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Portfolio Optimizer")
+                .font(.headline)
+            
+            let suggestions = AdvancedAnalytics.generateOptimizationSuggestions(cards: cards)
+            
+            ForEach(suggestions.indices, id: \.self) { index in
+                let suggestion = suggestions[index]
+                
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text(suggestion.title)
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                        
+                        Spacer()
+                        
+                        Text(suggestion.priority == .high ? "HIGH" : suggestion.priority == .medium ? "MED" : "LOW")
+                            .font(.caption)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(suggestion.priority.color.opacity(0.2))
+                            .foregroundColor(suggestion.priority.color)
+                            .cornerRadius(4)
+                    }
+                    
+                    Text(suggestion.description)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    
+                    Text("Impact: \(suggestion.impact)")
+                        .font(.caption)
+                        .foregroundColor(.blue)
+                }
+                .padding()
+                .background(Color.blue.opacity(0.05))
+                .cornerRadius(6)
+            }
+        }
+        .padding()
+        .background(Color.gray.opacity(0.1))
+        .cornerRadius(8)
+    }
+    
+    private var aiAssistantSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("AI Assistant")
+                .font(.headline)
+            
+            HStack {
+                TextField("Ask about your collection...", text: $queryText)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                
+                Button("Ask") {
+                    Task {
+                        await aiAssistant.sendMessage(queryText)
+                        await MainActor.run { queryText = "" }
+                    }
+                }
+                .disabled(queryText.isEmpty || aiAssistant.isProcessing)
+            }
+            
+            if aiAssistant.isProcessing {
+                HStack {
+                    ProgressView()
+                        .scaleEffect(0.8)
+                    Text("Analyzing...")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            
+            ForEach(Array(aiAssistant.responses.suffix(3)).enumerated(), id: \.offset) { _, response in
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Q: \(response.query)")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                    
+                    Text("A: \(response.response)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(8)
+                .background(Color.blue.opacity(0.05))
+                .cornerRadius(6)
+            }
+        }
+        .padding()
+        .background(Color.gray.opacity(0.1))
+        .cornerRadius(8)
+    }
+}
+
+
+// 1) Card List (with Filters, Sort, and Add)
+#Preview("Card List") {
+    let preview = PersistenceController.preview
+    let context = preview.container.viewContext
+    return CardListView(context: context)
+        .environment(\.managedObjectContext, context)
+}
+// 2) Dashboard (Portfolio Stats)
+
+#Preview("Dashboard") {
+    let preview = PersistenceController.preview
+    let context = preview.container.viewContext
+    return DashboardView(context: context)
+        .environment(\.managedObjectContext, context)
+}
+// 3) Single Card Detail
+#Preview("Card Detail") {
+    let preview = PersistenceController.preview
+    let context = preview.container.viewContext
+    // Grab a sample card
+    let req = BaseballCard.fetchAllSortedRequest()
+    let card = (try? context.fetch(req).first) ?? BaseballCard.insert(
+        in: context, playerName: "Sample Player", year: 1992, brand: "Topps", setName: "Base Set", cardNumber: "100"
+    )
+    return NavigationStack {
+        CardDetailView(card: card)
+    }
+    .environment(\.managedObjectContext, context)
+}
+
+// 4) Filter Sheet (AdvancedFiltersView) in Isolation
+
+#Preview("Filter Sheet") {
+    @State var filter = CardFilter()
+    return AdvancedFiltersView(filter: $filter)
+}
+
+// 5) Minimal “Inline” List Using CardsQuery
+private struct MiniCardsList: View {
+    @StateObject private var query: CardsQuery
+    @State private var filter = CardFilter()
+    @State private var sort: CardSort = .yearDesc
+
+    init(context: NSManagedObjectContext) {
+        _query = StateObject(wrappedValue: CardsQuery(context: context))
+    }
+
+    var body: some View {
+        List {
+            ForEach(query.items, id: \.objectID) { card in
+                CardRow(card: card)
+            }
+        }
+        .task { try? query.apply(filter: filter, sort: sort) }
+        .onChange(of: filter) { _ in try? query.apply(filter: filter, sort: sort) }
+        .onChange(of: sort) { _ in try? query.apply(filter: filter, sort: sort) }
+    }
+}
+
+#Preview("Mini Cards List") {
+    let preview = PersistenceController.preview
+    let context = preview.container.viewContext
+    return MiniCardsList(context: context)
+        .environment(\.managedObjectContext, context)
+}
+// 6) Hits & Rarity / Grading / Value Tiers Sections as Standalone
+#Preview("Stats Sections") {
+    let preview = PersistenceController.preview
+    let context = preview.container.viewContext
+    let stats = try? StatsService(ctx: context).compute()
+    return List {
+        if let s = stats {
+            HeroStatsSection(stats: s)
+            HitsAndRaritySection(stats: s)
+            GradingSection(stats: s)
+            ValueBucketsSection(stats: s)
+            DataHygieneSection(stats: s)
+        } else {
+            Text("No stats available")
+        }
+    }
+}
+
+// 7) Add Card Flow
+
+#Preview("Add Card") {
+    AddCardView()
+        .environment(\.managedObjectContext, PersistenceController.preview.container.viewContext)
+}
+
+//8) Filter Chips Row
+#Preview("Filter Chips") {
+    @State var filter = CardFilter()
+    return FilterChipsView(filter: $filter)
+        .padding()
+        .previewLayout(.sizeThatFits)
+}
+
+// 9) “List + Dashboard” Split (iPad/macOS)
+
+private struct SplitRoot: View {
+    let context: NSManagedObjectContext
+    var body: some View {
+        NavigationSplitView {
+            CardListView(context: context)
+        } detail: {
+            DashboardView(context: context)
+        }
+    }
+}
+
+#Preview("Split View") {
+    let preview = PersistenceController.preview
+    let context = preview.container.viewContext
+    return SplitRoot(context: context)
+        .environment(\.managedObjectContext, context)
+}
